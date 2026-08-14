@@ -30,8 +30,8 @@ use taceo_groth16_sol::{SolidityVerifierConfig, SolidityVerifierContext};
 use mirage_relation::{fixture, public_signals, Bounds, ReceiptCircuit};
 
 fn main() {
-    // CARGO_MANIFEST_DIR is `circuits/crates/prover`, so reaching
-    // `circuits/contracts` takes two levels up, not one.
+    // CARGO_MANIFEST_DIR is `crates/prover`, so reaching the repo's
+    // `contracts/` takes two levels up, not one.
     let out = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../contracts");
     std::fs::create_dir_all(&out).expect("create contracts/");
 
