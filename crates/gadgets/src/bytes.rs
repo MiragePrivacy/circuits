@@ -140,6 +140,14 @@ pub fn one_hot<F: PrimeField>(
         sel.push(Boolean::new_witness(cs.clone(), || Ok(bit))?);
     }
 
+    enforce_one_hot(idx, &sel)?;
+    Ok(sel)
+}
+
+fn enforce_one_hot<F: PrimeField>(
+    idx: &FpVar<F>,
+    sel: &[Boolean<F>],
+) -> Result<(), SynthesisError> {
     // Exactly one indicator when idx is in range, none when it is not.
     let mut sum = FpVar::zero();
     let mut weighted = FpVar::zero();
@@ -149,13 +157,17 @@ pub fn one_hot<F: PrimeField>(
         weighted += f * FpVar::constant(F::from(i as u64));
     }
 
+    // Boolean indicators do not by themselves make their sum boolean. Without
+    // this constraint, several hits can have a weighted average equal to idx
+    // (for example positions 0 and 2 for idx 1).
+    (&sum * (&sum - FpVar::one())).enforce_equal(&FpVar::zero())?;
+
     // in_range is itself derived from the indicators, so a prover cannot claim
-    // in-range for an out-of-range index: sum is 0 or 1 by the boolean
-    // allocations plus this equality.
+    // in-range for an out-of-range index.
     let in_range = sum.clone();
     weighted.enforce_equal(&(idx * &in_range))?;
 
-    Ok(sel)
+    Ok(())
 }
 
 /// Reads `buf[idx]` for a witness `idx`.
@@ -353,6 +365,19 @@ mod tests {
             let hits: usize = sel.iter().filter(|b| b.value().unwrap()).count();
             assert_eq!(hits, if idx < 8 { 1 } else { 0 }, "hit count at idx {idx}");
         }
+    }
+
+    #[test]
+    fn one_hot_rejects_multiple_hits_with_the_right_weighted_average() {
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        // [1, 0, 1] has weighted sum 2 == idx * sum, so the old weighted-only
+        // relation accepted it even though it is not one-hot.
+        let sel = [true, false, true]
+            .into_iter()
+            .map(|value| Boolean::new_witness(cs.clone(), || Ok(value)).unwrap())
+            .collect::<Vec<_>>();
+        enforce_one_hot(&fp(cs.clone(), 1), &sel).unwrap();
+        assert!(!cs.is_satisfied().unwrap(), "accepted a multi-hit selector");
     }
 
     #[test]

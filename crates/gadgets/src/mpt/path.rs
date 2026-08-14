@@ -25,7 +25,7 @@ use ark_r1cs_std::GR1CSVar;
 use ark_r1cs_std::uint8::UInt8;
 use ark_relations::gr1cs::SynthesisError;
 
-use crate::bytes::{byte_to_field, one_hot, select_byte_with};
+use crate::bytes::{one_hot, select_byte_with};
 
 /// The two flag bits of a hex-prefix path.
 pub struct Flags<F: PrimeField> {
@@ -89,7 +89,7 @@ pub fn nibble_at<F: PrimeField>(
     index: &FpVar<F>,
 ) -> Result<FpVar<F>, SynthesisError> {
     // byte = index / 2, high half when index is even.
-    let byte_index = halve(index)?;
+    let (byte_index, remainder) = halve_with_remainder(index)?;
     let sel = one_hot(&byte_index, buf.len())?;
     let byte = select_byte_with(buf, &sel)?;
     let bits = byte.to_bits_le()?;
@@ -101,30 +101,33 @@ pub fn nibble_at<F: PrimeField>(
         high += FpVar::from(bits[i + 4].clone()) * FpVar::constant(F::from(1u64 << i));
     }
 
-    let is_even = is_even(index)?;
+    let is_even = !remainder;
     FpVar::conditionally_select(&is_even, &high, &low)
 }
 
-/// `index / 2`, with the halving constrained rather than witnessed freely.
-fn halve<F: PrimeField>(index: &FpVar<F>) -> Result<FpVar<F>, SynthesisError> {
+/// Returns `(floor(index / 2), index mod 2)` for a 32-bit non-negative index.
+///
+/// The quotient range constraint is essential. Over a prime field,
+/// `index = 2*half + rem` alone has a solution for either boolean remainder;
+/// bounding `half` below 2^32 makes the integer decomposition unique.
+fn halve_with_remainder<F: PrimeField>(
+    index: &FpVar<F>,
+) -> Result<(FpVar<F>, Boolean<F>), SynthesisError> {
     let cs = index.cs();
     let val = index.value().unwrap_or(F::zero());
     let as_u64 = field_to_u64(val);
 
     let half = FpVar::new_witness(cs.clone(), || Ok(F::from(as_u64 / 2)))?;
-    let rem = Boolean::new_witness(cs, || Ok(as_u64 % 2 == 1))?;
-    // index == 2*half + rem, with rem boolean. That pins both.
-    (&half * FpVar::constant(F::from(2u64)) + FpVar::from(rem)).enforce_equal(index)?;
-    Ok(half)
-}
-
-fn is_even<F: PrimeField>(index: &FpVar<F>) -> Result<Boolean<F>, SynthesisError> {
-    let cs = index.cs();
-    let as_u64 = field_to_u64(index.value().unwrap_or(F::zero()));
-    let half = FpVar::new_witness(cs.clone(), || Ok(F::from(as_u64 / 2)))?;
-    let rem = Boolean::new_witness(cs, || Ok(as_u64 % 2 == 1))?;
+    let rem = Boolean::new_witness(cs.clone(), || Ok(as_u64 % 2 == 1))?;
+    let mut bounded_half = FpVar::zero();
+    for bit in 0..32 {
+        let value = (as_u64 / 2) >> bit & 1 == 1;
+        let bit_var = Boolean::new_witness(cs.clone(), || Ok(value))?;
+        bounded_half += FpVar::from(bit_var) * FpVar::constant(F::from(1u64 << bit));
+    }
+    half.enforce_equal(&bounded_half)?;
     (&half * FpVar::constant(F::from(2u64)) + FpVar::from(rem.clone())).enforce_equal(index)?;
-    Ok(!rem)
+    Ok((half, rem))
 }
 
 fn field_to_u64<F: PrimeField>(v: F) -> u64 {
@@ -190,10 +193,9 @@ mod tests {
         assert!(cs.is_satisfied().unwrap(), "rejected a valid odd path");
     }
 
-    /// `halve` and `is_even` are definitional, like `bytes::one_hot`: the
-    /// witness is chosen to satisfy `index == 2*half + rem`, which holds for
-    /// every non-negative index. They stay satisfiable at any offset and must
-    /// **not** be gated, since a false gate would leave `half` unconstrained.
+    /// The quotient/remainder decomposition stays satisfiable at any 32-bit
+    /// offset and must not be gated, since a false gate would leave the
+    /// quotient unconstrained.
     ///
     /// This matters because the traversal calls `nibble_at` speculatively with
     /// offsets derived from a decode that may not apply.

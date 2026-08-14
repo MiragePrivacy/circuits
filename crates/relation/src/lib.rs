@@ -20,7 +20,10 @@
 use ark_ff::PrimeField;
 use ark_r1cs_std::alloc::AllocVar;
 use ark_r1cs_std::boolean::Boolean;
+use ark_r1cs_std::convert::ToBitsGadget;
+use ark_r1cs_std::eq::EqGadget;
 use ark_r1cs_std::fields::fp::FpVar;
+use ark_r1cs_std::fields::FieldVar;
 use ark_r1cs_std::uint8::UInt8;
 use ark_relations::gr1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
 
@@ -226,6 +229,7 @@ impl<F: PrimeField> ConstraintSynthesizer<F> for ReceiptCircuit {
         // against different values would defeat the whole exercise, so the same
         // allocations are used for both.
         let opening = alloc_opening(cs.clone(), &w.intent)?;
+        let ctx = alloc_statement(cs.clone(), &w.statement)?;
         let intent = Intent {
             token: opening.settlement_token.clone(),
             recipient: opening.recipient.clone(),
@@ -245,13 +249,39 @@ impl<F: PrimeField> ConstraintSynthesizer<F> for ReceiptCircuit {
         // statement hash and therefore into the public signals. Opening it here
         // is what turns "some Transfer happened" into "the Transfer this escrow
         // committed to happened".
-        let commitment = alloc_bounded(cs.clone(), &w.statement.intent_commitment, 32)?;
-        mirage_gadgets::commitment::open(&opening, &commitment, &Boolean::TRUE)?;
+        mirage_gadgets::commitment::open(&opening, &ctx.intent_commitment, &Boolean::TRUE)?;
+
+        // The commitment's deployment/request/row context must be the same
+        // context whose statement hash the verifier checks. The commitment
+        // hash alone only authenticates the opening internally.
+        enforce_bytes_equal(&opening.instance_domain, &ctx.instance_domain)?;
+        enforce_bytes_equal(&opening.chain_id, &ctx.chain_id)?;
+        enforce_bytes_equal(&opening.escrow, &ctx.escrow)?;
+        enforce_bytes_equal(&opening.request_id, &ctx.request_id)?;
+        enforce_bytes_equal(&opening.row_index, &ctx.row_index)?;
         //
         // The header supplies the root rather than the caller. Accepting a
         // caller-supplied root would let a prover invent a trie containing
         // whatever it liked.
         let parsed = header::parse(&header_bytes, &header_len, &Boolean::TRUE)?;
+
+        // Authenticate both header identity fields carried by the statement.
+        // Parsing a receiptsRoot is not useful unless the parsed header is the
+        // exact witness block selected by the verifier.
+        let header_digest =
+            mirage_gadgets::keccak::keccak256_var(&header_bytes, &header_len, &Boolean::TRUE)?;
+        for (got, want) in header_digest.iter().zip(ctx.witness_block_hash.iter()) {
+            UInt8::from_bits_le(got).enforce_equal(want)?;
+        }
+        let witness_number = fixed_be_value(&ctx.witness_block_number)?;
+        parsed.number.enforce_equal(&witness_number)?;
+
+        // Settlement is valid only in the half-open/closed lease interval:
+        // bondStartBlock < txBlockNumber <= bondDeadline.
+        let bond_start = fixed_be_value(&ctx.bond_start_block)?;
+        let bond_deadline = fixed_be_value(&ctx.bond_deadline)?;
+        lt_u64(&bond_start, &parsed.number)?.enforce_equal(&Boolean::TRUE)?;
+        lt_u64(&bond_deadline, &parsed.number)?.enforce_equal(&Boolean::FALSE)?;
 
         // The receipt is the MPT leaf's value, so inclusion binds the exact
         // bytes the log walk then inspects. Without that link the relation
@@ -279,12 +309,54 @@ impl<F: PrimeField> ConstraintSynthesizer<F> for ReceiptCircuit {
         // Recomputed from privately supplied context and checked against the
         // two public signals. Every field is already public on-chain; hashing
         // them down only shrinks the verifier.
-        let ctx = alloc_statement(cs.clone(), &w.statement)?;
         let signals = statement::compute(&ctx)?;
         statement::enforce(&signals, &public_hi, &public_lo, &Boolean::TRUE)?;
 
         Ok(())
     }
+}
+
+fn enforce_bytes_equal<F: PrimeField>(
+    left: &[UInt8<F>],
+    right: &[UInt8<F>],
+) -> Result<(), SynthesisError> {
+    assert_eq!(
+        left.len(),
+        right.len(),
+        "bound fields must have the same width"
+    );
+    for (left, right) in left.iter().zip(right.iter()) {
+        left.enforce_equal(right)?;
+    }
+    Ok(())
+}
+
+fn fixed_be_value<F: PrimeField>(bytes: &[UInt8<F>]) -> Result<FpVar<F>, SynthesisError> {
+    let mut value = FpVar::zero();
+    for byte in bytes {
+        value =
+            value * FpVar::constant(F::from(256u64)) + mirage_gadgets::bytes::byte_to_field(byte)?;
+    }
+    Ok(value)
+}
+
+/// Compares field elements that are required here to be unsigned 64-bit
+/// integers. Range-constraining both operands prevents field wraparound from
+/// changing the ordering relation.
+fn lt_u64<F: PrimeField>(a: &FpVar<F>, b: &FpVar<F>) -> Result<Boolean<F>, SynthesisError> {
+    let a_bits = a.to_bits_le()?;
+    let b_bits = b.to_bits_le()?;
+    for bit in a_bits.iter().skip(64).chain(b_bits.iter().skip(64)) {
+        bit.enforce_equal(&Boolean::FALSE)?;
+    }
+
+    let mut equal = Boolean::TRUE;
+    let mut less = Boolean::FALSE;
+    for i in (0..64).rev() {
+        less = less | (equal.clone() & !a_bits[i].clone() & b_bits[i].clone());
+        equal = equal & !(a_bits[i].clone() ^ &b_bits[i]);
+    }
+    Ok(less)
 }
 
 /// The commitment opening as circuit bytes, in spec 8.3 widths.
@@ -517,6 +589,7 @@ pub mod fixture {
         // header -> receiptsRoot -> inclusion does not close.
         let root_hash = keccak(&root_node);
         let header = header_with_receipts_root(&root_hash, 21_000_000);
+        let header_hash = keccak(&header);
 
         Witness {
             root: root_hash.to_vec(),
@@ -549,7 +622,7 @@ pub mod fixture {
                     a
                 },
                 witness_block_number: 21_000_000,
-                witness_block_hash: [0x66; 32],
+                witness_block_hash: header_hash,
             },
         }
     }
@@ -587,6 +660,30 @@ mod tests {
     use super::*;
     use ark_bn254::Fr;
     use ark_relations::gr1cs::ConstraintSystem;
+
+    fn refresh_commitment(w: &mut Witness) {
+        w.statement.intent_commitment = mirage_encoding::commitment::Intent {
+            instance_domain: w.intent.instance_domain,
+            chain_id: w.intent.chain_id,
+            escrow: w.intent.escrow,
+            request_id: w.intent.request_id,
+            row_index: w.intent.row_index,
+            asset_kind: mirage_encoding::AssetKind::Erc20,
+            settlement_token: w.intent.settlement_token,
+            recipient: w.intent.recipient,
+            settlement_amount: w.intent.settlement_amount,
+            salt: w.intent.salt,
+        }
+        .commitment();
+    }
+
+    fn assert_rejected(w: Witness, message: &str) {
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        ReceiptCircuit::prove(Bounds::default(), w)
+            .generate_constraints(cs.clone())
+            .unwrap();
+        assert!(!cs.is_satisfied().unwrap(), "{message}");
+    }
 
     /// The gap this closes: a prover must not be able to substitute the
     /// settlement details.
@@ -629,6 +726,45 @@ mod tests {
             !cs.is_satisfied().unwrap(),
             "accepted an amount the commitment does not open to"
         );
+    }
+
+    #[test]
+    fn rejects_a_commitment_from_another_context() {
+        let mut w = fixture::genuine();
+        // Keep the statement context fixed, but provide a perfectly valid
+        // commitment and opening for a different domain/chain/escrow/request/row.
+        w.intent.instance_domain = [0xa1; 32];
+        w.intent.chain_id = 2;
+        w.intent.escrow = [0xa2; 20];
+        w.intent.request_id = [0xa3; 32];
+        w.intent.row_index = 7;
+        refresh_commitment(&mut w);
+        assert_rejected(w, "accepted a commitment created for another context");
+    }
+
+    #[test]
+    fn rejects_an_unauthenticated_header_hash() {
+        let mut w = fixture::genuine();
+        w.statement.witness_block_hash = [0xff; 32];
+        assert_rejected(w, "accepted a header not named by the statement");
+    }
+
+    #[test]
+    fn rejects_a_header_number_different_from_the_statement() {
+        let mut w = fixture::genuine();
+        w.statement.witness_block_number += 1;
+        assert_rejected(w, "accepted a block number not named by the statement");
+    }
+
+    #[test]
+    fn rejects_blocks_outside_the_lease_window() {
+        let mut at_start = fixture::genuine();
+        at_start.statement.bond_start_block = at_start.statement.witness_block_number;
+        assert_rejected(at_start, "accepted a block at bondStartBlock");
+
+        let mut after_deadline = fixture::genuine();
+        after_deadline.statement.bond_deadline = after_deadline.statement.witness_block_number - 1;
+        assert_rejected(after_deadline, "accepted a block after bondDeadline");
     }
 
     #[test]
