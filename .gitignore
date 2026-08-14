@@ -1,0 +1,10 @@
+target/
+target-*/
+*.zkey
+*.ptau
+*.bin
+
+# Foundry build output. `contracts/` holds the generated verifier and is
+# tracked; `forge-out/` is where forge writes compiled artifacts.
+forge-out/
+cache/

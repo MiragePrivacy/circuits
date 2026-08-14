@@ -1,0 +1,19 @@
+[package]
+name = "mirage-relation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ark-ff.workspace = true
+ark-relations.workspace = true
+ark-r1cs-std.workspace = true
+ark-std.workspace = true
+mirage-gadgets = { path = "../gadgets" }
+mirage-encoding = { path = "../encoding" }
+
+[dev-dependencies]
+ark-bn254.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+hex.workspace = true

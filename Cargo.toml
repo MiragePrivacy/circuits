@@ -1,0 +1,42 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/encoding",
+    "crates/gadgets",
+    "crates/relation",
+    "crates/prover",
+    "crates/fixtures",
+]
+exclude = ["bench-arkworks"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "UNLICENSED"
+
+[workspace.dependencies]
+# Proof system. Pinned deliberately: a version bump changes the constraint
+# system and therefore the verification key, which under spec Section 18.4 is a
+# new circuit version requiring a new setup and audit delta.
+ark-groth16 = { version = "0.6", default-features = false }
+ark-bn254 = { version = "0.6", default-features = false, features = ["curve"] }
+ark-ff = { version = "0.6", default-features = false }
+ark-ec = { version = "0.6", default-features = false }
+ark-relations = { version = "0.6", default-features = false }
+ark-r1cs-std = { version = "0.6", default-features = false }
+ark-serialize = { version = "0.6", default-features = false }
+ark-std = { version = "0.6", default-features = false }
+ark-crypto-primitives = { version = "0.6", default-features = false }
+
+# Reference implementations for the deterministic vectors. These run natively,
+# never in-circuit: every gadget is checked against them.
+ureq = { version = "2.10", default-features = false, features = ["tls", "json"] }
+tiny-keccak = { version = "2.0", features = ["keccak"] }
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

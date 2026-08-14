@@ -1,0 +1,39 @@
+[package]
+name = "mirage-prover"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "measure"
+path = "src/bin/measure.rs"
+
+[[bin]]
+name = "export-verifier"
+path = "src/bin/export_verifier.rs"
+
+[dependencies]
+ark-groth16.workspace = true
+ark-snark = { version = "0.6", default-features = false }
+ark-bn254.workspace = true
+ark-ff.workspace = true
+ark-ec.workspace = true
+ark-relations.workspace = true
+ark-serialize.workspace = true
+ark-std = { workspace = true, features = ["print-trace"] }
+mirage-relation = { path = "../relation" }
+hex.workspace = true
+num-bigint = "0.4"
+# Renders the Solidity verifier from gnark's template. Builds against
+# ark-groth16 0.6, the same version this workspace pins, so the verifying key
+# passes through without conversion.
+taceo-groth16-sol = "0.4.2"
+
+[features]
+default = ["parallel"]
+parallel = [
+    "ark-groth16/parallel",
+    "ark-ff/parallel",
+    "ark-ec/parallel",
+    "ark-std/parallel",
+]

@@ -1,0 +1,27 @@
+# Foundry project for the on-chain half of the circuit work.
+#
+# Separate from the escrow's own foundry.toml so contract changes there cannot
+# silently alter what the verifier measurement reports.
+#
+# Note the directory names. The exported verifier lives in `contracts/`, not
+# `out/`: forge treats its `out` directory as build output and clears it, which
+# destroyed an earlier export. Generated *source* and build *artifacts* must not
+# share a path.
+#
+# `forge-std` is borrowed from the escrow checkout rather than vendored again.
+
+[profile.default]
+src = "contracts"
+test = "test"
+out = "forge-out"
+libs = ["../lib"]
+optimizer = true
+# Matches the escrow's setting, so the size measured here is the size the escrow
+# would deploy.
+optimizer_runs = 200
+# Reads contracts/proof.json for the exported proof.
+fs_permissions = [{ access = "read", path = "./contracts" }]
+
+remappings = [
+    "forge-std/=../lib/forge-std/src/",
+]
