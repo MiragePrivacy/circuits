@@ -80,11 +80,12 @@ fn arr<const N: usize>(s: &str) -> [u8; N] {
 }
 
 fn witness(f: &Fixture) -> Witness {
+    let header = bytes(&f.header);
     Witness {
         root: bytes(&f.receipts_root),
         key: bytes(&f.key),
         receipt: bytes(&f.receipt),
-        header: bytes(&f.header),
+        header: header.clone(),
         nodes: f.nodes.iter().map(|n| bytes(n)).collect(),
         log_index: 0,
         intent: IntentOpening {
@@ -119,7 +120,9 @@ fn witness(f: &Fixture) -> Witness {
                 a
             },
             witness_block_number: f.block_number,
-            witness_block_hash: [0x66; 32],
+            // The header's own keccak, not a placeholder: the relation binds
+            // the parsed header to the block hash the statement names.
+            witness_block_hash: mirage_encoding::keccak256(&header),
         },
     }
 }
