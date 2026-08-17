@@ -4,6 +4,11 @@ Recorded 2026-08-12, before any relation code was written. This is the
 "measure first" gate from spec Section 25 step 1, and it returned a bad number
 for the assumed toolchain.
 
+The backend conclusions stand. The projections have since been checked against
+the built relation and real mainnet data; where a section has been superseded by
+a measurement, an update note says so inline rather than editing the original
+reasoning.
+
 ## Circom + snarkjs: does not fit the Section 12.9 bounds
 
 Spec Section 12.1 freezes Circom 2 + snarkjs. The arithmetic does not support
@@ -674,14 +679,20 @@ RLP items of which most are 32-byte hashes, so roughly 530-570 bytes, and
 tries run 6-9 deep rather than 16. Bounds of 640 bytes and depth 9 would put
 the MPT term near ~7M and the whole relation within reach.
 
-**Measuring the real distribution of mainnet receipt-trie node sizes and depths
-is the highest-value task available.** It is a measurement against nomad's
-existing `generate_proof` code path, not an argument, and it sets the
-constants.
+**Update: measured, and the projection held.** `crates/fixtures` collected 100
+mainnet direct-transfer settlements; maxima were 532-byte nodes at depth 3,
+428-byte receipts and 655-byte headers. The relation compiled against those
+bounds is **10,426,684 constraints** — roughly 29 GB at ~2.8 GB per million,
+within a provisioned enclave. The estimate above was right about which term
+dominates and conservative about its magnitude.
 
-It does **not** block writing the RLP and MPT gadgets. Bounds are compile-time
-constants; the parser code is identical whichever values they take. Sequencing
-the measurement first only avoids re-running benchmarks, not rework.
+Depth was the biggest surprise: real receipt tries run 2-3 levels, not the 6-9
+guessed here, because a block's receipt count is only a few hundred. The
+compiled bound is 4.
+
+The measurement did not block gadget work, as predicted — bounds are
+compile-time constants and the parser code is identical whichever values they
+take.
 
 Note the coupling: bounds are public circuit parameters, and a receipt whose
 proof exceeds them is unprovable. Tightening them narrows which settlements are
@@ -1924,8 +1935,13 @@ time would merely be a spec amendment. Depth 16 at a realistic 640-byte node
 bound is ~12.8M and ~36 GB, which is workable — the node-size term is what
 breaks it.
 
-The measurement that sets those constants runs against nomad's `generate_proof`
-path. It does not block gadget work.
+Those constants have since been measured against 100 mainnet fixtures: the
+relation is 10,426,684 constraints at ~29 GB, confirming this section's
+reasoning. See "Update: measured, and the projection held" above.
+
+Proving at those bounds measures **22.6s** (setup 41.7s), inside spec 19.7's 75s
+p95. The ~5 minute figure above was for the 43.7M-constraint worst case, so
+latency never became the spec amendment this section anticipated.
 
 Two facts to hold onto while building:
 
@@ -1936,3 +1952,36 @@ Two facts to hold onto while building:
 - `ark-r1cs-std` has live underconstraining bugs (#212, #213, #216) and no
   Picus frontend. Every gadget written here carries its own soundness burden
   with no static analysis to catch a missing constraint.
+
+## Placeholder witness values defeat the tests that would catch them
+
+Recorded 2026-08-17, from `ead0999` ("fix: bind settlement circuit context").
+
+That commit added the constraints binding the parsed header to the statement's
+`witnessBlockHash` and `witnessBlockNumber`. Two places still carried a
+hardcoded `[0x66; 32]` placeholder for that hash:
+
+- `contracts/proof.json`, left stale because the artifacts were not regenerated
+- `crates/relation/tests/mainnet.rs`, in the fixture builder
+
+A fixed placeholder can never equal a real header keccak, so **all 100 mainnet
+fixtures failed** at a single constraint index. The commit landed anyway.
+
+Three lessons, in order of how much time each would have saved:
+
+- **A placeholder that a new constraint makes unsatisfiable is not a stub, it is
+  a broken test.** Both sites should derive the value the way
+  `fixture::genuine()` does: hash the header the fixture already carries.
+- **Uniform failure at one constraint index across varied inputs means one
+  systematic bug, not bad data.** 100 fixtures spanning different blocks, tx
+  indices and receipt types all failing identically is a strong signal, and it
+  is visible in the first failure message.
+- **Diagnostics dominate runtime when everything fails.**
+  `which_is_unsatisfied()` walks the full constraint system per failing fixture,
+  so a uniformly broken relation turns an 8-minute suite into hours. A long run
+  should raise "is it failing?" before "is it just big?". Flat RSS during a loop
+  that builds and drops constraint systems is the tell.
+
+The general form: when a commit adds a constraint, every witness source feeding
+that constraint is part of the change. Grepping the new field name for literal
+placeholders is a cheap complete check.
