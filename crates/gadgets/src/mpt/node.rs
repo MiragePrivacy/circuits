@@ -97,7 +97,7 @@ pub fn decode_branch<F: PrimeField>(
             &FpVar::constant(F::from(33u64)),
             &FpVar::one(),
         )?;
-        cursor = cursor + step;
+        cursor += step;
     }
 
     // The seventeenth item is the value slot, decoded generally: it is empty in
@@ -149,12 +149,20 @@ pub fn branch_child_offset<F: PrimeField>(
     active: &Boolean<F>,
 ) -> Result<FpVar<F>, SynthesisError> {
     let sel = one_hot(nibble, 16)?;
+    // Zip stops at the shortest, so a short branch would silently select over
+    // fewer slots rather than failing. The selector must cover all sixteen.
+    assert_eq!(branch.child_offset.len(), 16, "branch has sixteen children");
+    assert_eq!(branch.occupied.len(), 16, "branch has sixteen slot flags");
 
     let mut offset = FpVar::zero();
     let mut occupied = Boolean::FALSE;
-    for i in 0..16 {
-        offset = FpVar::conditionally_select(&sel[i], &branch.child_offset[i], &offset)?;
-        occupied = Boolean::conditionally_select(&sel[i], &branch.occupied[i], &occupied)?;
+    for ((s, child), slot) in sel
+        .iter()
+        .zip(branch.child_offset.iter())
+        .zip(branch.occupied.iter())
+    {
+        offset = FpVar::conditionally_select(s, child, &offset)?;
+        occupied = Boolean::conditionally_select(s, slot, &occupied)?;
     }
     occupied.conditional_enforce_equal(&Boolean::TRUE, active)?;
     Ok(offset)
@@ -228,7 +236,7 @@ mod tests {
     use ark_relations::gr1cs::ConstraintSystem;
 
     use crate::bytes::alloc_bounded;
-    use crate::mpt::tests::{branch_node, leaf_node, to_nibbles};
+    use crate::mpt::tests::{branch_node, leaf_node};
 
     const BOUND: usize = 640;
 
@@ -385,7 +393,10 @@ mod tests {
     fn traversal_components_on_a_leaf() {
         let node = leaf_node(&[5, 7, 1], &[0xaa; 40]);
 
-        let steps: Vec<(&str, fn(&[UInt8<Fr>], &FpVar<Fr>) -> ())> = vec![
+        /// A traversal component under test, run for its constraints alone.
+        type Step = fn(&[UInt8<Fr>], &FpVar<Fr>);
+
+        let steps: Vec<(&str, Step)> = vec![
             ("is_branch", |b, l| {
                 let _ = is_branch(b, l, &Boolean::TRUE).unwrap();
             }),

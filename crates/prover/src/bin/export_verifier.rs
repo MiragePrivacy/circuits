@@ -22,7 +22,6 @@ use std::path::PathBuf;
 
 use ark_bn254::{Bn254, Fr};
 use ark_groth16::{Groth16, Proof, VerifyingKey};
-use ark_serialize::CanonicalSerialize;
 use ark_snark::SNARK;
 use ark_std::rand::SeedableRng;
 use taceo_groth16_sol::{SolidityVerifierConfig, SolidityVerifierContext};

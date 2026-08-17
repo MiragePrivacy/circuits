@@ -82,12 +82,12 @@ fn xor_lane<F: PrimeField>(
     for i in 0..64 {
         out.push(a[i].clone() ^ &b[i]);
     }
-    Ok(out.try_into().map_err(|_| SynthesisError::Unsatisfiable)?)
+    out.try_into().map_err(|_| SynthesisError::Unsatisfiable)
 }
 
 /// The keccak-f[1600] permutation, 24 rounds.
 pub fn keccak_f1600<F: PrimeField>(mut st: State<F>) -> Result<State<F>, SynthesisError> {
-    for round in 0..24 {
+    for rc in RC {
         // theta: column parities, then fold each into its column.
         let mut bc: Vec<[Boolean<F>; 64]> = Vec::with_capacity(5);
         for i in 0..5 {
@@ -132,10 +132,9 @@ pub fn keccak_f1600<F: PrimeField>(mut st: State<F>) -> Result<State<F>, Synthes
 
         // iota: XOR the round constant into lane 0. Constant operand, so this
         // is a linear combination rather than a constraint.
-        let rc = RC[round];
-        for b in 0..64 {
+        for (b, bit) in st[0].iter_mut().enumerate() {
             if (rc >> b) & 1 == 1 {
-                st[0][b] = !st[0][b].clone();
+                *bit = !bit.clone();
             }
         }
     }
@@ -153,7 +152,7 @@ mod tests {
 
     /// Native keccak-f[1600], for differential testing.
     fn native_f1600(st: &mut [u64; 25]) {
-        for round in 0..24 {
+        for rc in RC {
             let mut bc = [0u64; 5];
             for i in 0..5 {
                 bc[i] = st[i] ^ st[i + 5] ^ st[i + 10] ^ st[i + 15] ^ st[i + 20];
@@ -178,7 +177,7 @@ mod tests {
                     st[(i * 5) + j] = row[j] ^ ((!row[(j + 1) % 5]) & row[(j + 2) % 5]);
                 }
             }
-            st[0] ^= RC[round];
+            st[0] ^= rc;
         }
     }
 

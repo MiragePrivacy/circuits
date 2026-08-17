@@ -323,6 +323,50 @@ pub fn alloc_bounded<F: PrimeField>(
         .collect()
 }
 
+/// A zero field element carrying a buffer's constraint system.
+///
+/// `FpVar::zero()` is a constant with no `cs`, and any gadget that allocates
+/// witnesses from an offset needs one — passing a constant zero yields
+/// `MissingCS` at synthesis time. Deriving zero from a buffer byte keeps the
+/// reference at the cost of one equality constraint.
+pub fn zero_like<F: PrimeField>(buf: &[UInt8<F>]) -> Result<FpVar<F>, SynthesisError> {
+    let cs = buf
+        .first()
+        .map(|b| b.cs())
+        .unwrap_or(ConstraintSystemRef::None);
+    let z = FpVar::new_witness(cs, || Ok(F::zero()))?;
+    z.enforce_equal(&FpVar::zero())?;
+    Ok(z)
+}
+
+/// `a < b` for small non-negative field elements.
+///
+/// Both operands must be known to fit well below 2^32, which every offset,
+/// length and index in this crate does. The difference is bit-decomposed and
+/// the high bits checked: if `a >= b` the subtraction wraps in the field and
+/// those bits are set.
+///
+/// Consolidated here from three near-identical copies that had accumulated in
+/// `rlp::cursor` and `mpt::traverse`. A comparison gadget is exactly the kind
+/// of thing that should exist once: a subtle difference between copies is
+/// invisible until it is a soundness bug.
+pub fn lt<F: PrimeField>(a: &FpVar<F>, b: &FpVar<F>) -> Result<Boolean<F>, SynthesisError> {
+    let diff = b - a;
+    let bits = diff.to_bits_le()?;
+    let mut high = Boolean::FALSE;
+    for bit in bits.iter().skip(32) {
+        high |= bit;
+    }
+    let is_zero = diff.is_eq(&FpVar::zero())?;
+    Ok(!high & !is_zero)
+}
+
+/// `a <= b`, on the same terms as [`lt`].
+pub fn le<F: PrimeField>(a: &FpVar<F>, b: &FpVar<F>) -> Result<Boolean<F>, SynthesisError> {
+    let is_eq = a.is_eq(b)?;
+    Ok(lt(a, b)? | is_eq)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -514,48 +558,4 @@ mod tests {
             println!("select_byte over {n} bytes: {} constraints", cs.num_constraints() - before);
         }
     }
-}
-
-/// A zero field element carrying a buffer's constraint system.
-///
-/// `FpVar::zero()` is a constant with no `cs`, and any gadget that allocates
-/// witnesses from an offset needs one — passing a constant zero yields
-/// `MissingCS` at synthesis time. Deriving zero from a buffer byte keeps the
-/// reference at the cost of one equality constraint.
-pub fn zero_like<F: PrimeField>(buf: &[UInt8<F>]) -> Result<FpVar<F>, SynthesisError> {
-    let cs = buf
-        .first()
-        .map(|b| b.cs())
-        .unwrap_or(ConstraintSystemRef::None);
-    let z = FpVar::new_witness(cs, || Ok(F::zero()))?;
-    z.enforce_equal(&FpVar::zero())?;
-    Ok(z)
-}
-
-/// `a < b` for small non-negative field elements.
-///
-/// Both operands must be known to fit well below 2^32, which every offset,
-/// length and index in this crate does. The difference is bit-decomposed and
-/// the high bits checked: if `a >= b` the subtraction wraps in the field and
-/// those bits are set.
-///
-/// Consolidated here from three near-identical copies that had accumulated in
-/// `rlp::cursor` and `mpt::traverse`. A comparison gadget is exactly the kind
-/// of thing that should exist once: a subtle difference between copies is
-/// invisible until it is a soundness bug.
-pub fn lt<F: PrimeField>(a: &FpVar<F>, b: &FpVar<F>) -> Result<Boolean<F>, SynthesisError> {
-    let diff = b - a;
-    let bits = diff.to_bits_le()?;
-    let mut high = Boolean::FALSE;
-    for bit in bits.iter().skip(32) {
-        high = high | bit;
-    }
-    let is_zero = diff.is_eq(&FpVar::zero())?;
-    Ok(!high & !is_zero)
-}
-
-/// `a <= b`, on the same terms as [`lt`].
-pub fn le<F: PrimeField>(a: &FpVar<F>, b: &FpVar<F>) -> Result<Boolean<F>, SynthesisError> {
-    let is_eq = a.is_eq(b)?;
-    Ok(lt(a, b)? | is_eq)
 }

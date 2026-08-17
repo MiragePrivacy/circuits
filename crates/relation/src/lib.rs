@@ -353,8 +353,8 @@ fn lt_u64<F: PrimeField>(a: &FpVar<F>, b: &FpVar<F>) -> Result<Boolean<F>, Synth
     let mut equal = Boolean::TRUE;
     let mut less = Boolean::FALSE;
     for i in (0..64).rev() {
-        less = less | (equal.clone() & !a_bits[i].clone() & b_bits[i].clone());
-        equal = equal & !(a_bits[i].clone() ^ &b_bits[i]);
+        less |= equal.clone() & !a_bits[i].clone() & b_bits[i].clone();
+        equal &= !(a_bits[i].clone() ^ &b_bits[i]);
     }
     Ok(less)
 }
@@ -364,7 +364,7 @@ fn alloc_opening<F: PrimeField>(
     cs: ConstraintSystemRef<F>,
     i: &IntentOpening,
 ) -> Result<mirage_gadgets::commitment::Opening<F>, SynthesisError> {
-    let mut b = |v: &[u8], n: usize| alloc_bounded(cs.clone(), v, n);
+    let b = |v: &[u8], n: usize| alloc_bounded(cs.clone(), v, n);
     Ok(mirage_gadgets::commitment::Opening {
         instance_domain: b(&i.instance_domain, 32)?,
         chain_id: b(&mirage_encoding::u64_to_word(i.chain_id), 32)?,
@@ -384,7 +384,7 @@ fn alloc_statement<F: PrimeField>(
     cs: ConstraintSystemRef<F>,
     c: &StatementContext,
 ) -> Result<statement::Context<F>, SynthesisError> {
-    let mut b = |v: &[u8], n: usize| alloc_bounded(cs.clone(), v, n);
+    let b = |v: &[u8], n: usize| alloc_bounded(cs.clone(), v, n);
     Ok(statement::Context {
         instance_domain: b(&c.instance_domain, 32)?,
         chain_id: b(&mirage_encoding::u64_to_word(c.chain_id), 32)?,
@@ -434,12 +434,6 @@ fn native_signals(c: &StatementContext) -> (u128, u128) {
         witness_block_hash: c.witness_block_hash,
     }
     .public_signals()
-}
-
-fn pad(v: &[u8], n: usize) -> Vec<u8> {
-    let mut out = v.to_vec();
-    out.resize(n, 0);
-    out
 }
 
 /// Builds a witness whose receipt sits in a two-level trie.

@@ -63,7 +63,7 @@ pub fn parse<F: PrimeField>(
     // A typed receipt starts with one of exactly four prefixes.
     let mut is_typed = Boolean::FALSE;
     for t in 1u8..=4 {
-        is_typed = is_typed | first.is_eq(&UInt8::constant(t))?;
+        is_typed |= first.is_eq(&UInt8::constant(t))?;
     }
 
     // A legacy receipt starts with an RLP list header, 0xc0 or above. Read it

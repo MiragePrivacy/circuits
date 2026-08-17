@@ -77,9 +77,9 @@ fn absorb_block<F: PrimeField>(
     for (byte_idx, byte) in block.iter().enumerate() {
         let lane = byte_idx / 8;
         let within = byte_idx % 8;
-        for bit in 0..8 {
+        for (bit, value) in byte.iter().enumerate() {
             let pos = within * 8 + bit;
-            st[lane][pos] = st[lane][pos].clone() ^ &byte[bit];
+            st[lane][pos] = st[lane][pos].clone() ^ value;
         }
     }
     Ok(())

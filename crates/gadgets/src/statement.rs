@@ -157,7 +157,6 @@ pub fn enforce<F: PrimeField>(
 mod tests {
     use super::*;
     use ark_bn254::Fr;
-    use ark_r1cs_std::alloc::AllocVar;
     use ark_r1cs_std::GR1CSVar;
     use ark_relations::gr1cs::ConstraintSystem;
 

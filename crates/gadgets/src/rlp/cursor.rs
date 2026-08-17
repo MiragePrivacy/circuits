@@ -23,7 +23,7 @@ use ark_r1cs_std::uint8::UInt8;
 use ark_relations::gr1cs::SynthesisError;
 
 use super::{Item, RlpDecoder};
-use crate::bytes::{byte_to_field, one_hot, select_byte_with};
+use crate::bytes::{byte_to_field, lt, one_hot, select_byte_with};
 
 pub struct Cursor;
 
@@ -161,7 +161,7 @@ fn read_long_length<F: PrimeField>(
         let bv = byte_to_field(&byte)?;
 
         // This byte participates only while i < len_of_len.
-        let in_range = less_than_field(&FpVar::constant(F::from(i as u64)), len_of_len)?;
+        let in_range = lt(&FpVar::constant(F::from(i as u64)), len_of_len)?;
         let contrib = FpVar::conditionally_select(&in_range, &bv, &FpVar::zero())?;
         let shifted = FpVar::conditionally_select(
             &in_range,
@@ -177,7 +177,7 @@ fn read_long_length<F: PrimeField>(
 
     // An item claiming more length bytes than we read must be rejected, not
     // silently truncated: otherwise a prover hides length bytes we never see.
-    let within = less_than_field(
+    let within = lt(
         len_of_len,
         &FpVar::constant(F::from((MAX_LEN_BYTES + 1) as u64)),
     )?;
@@ -188,26 +188,10 @@ fn read_long_length<F: PrimeField>(
     let first_is_zero = first_byte.is_eq(&FpVar::zero())?;
     first_is_zero.conditional_enforce_equal(&Boolean::FALSE, active)?;
 
-    let at_least_56 = less_than_field(&FpVar::constant(F::from(55u64)), &value)?;
+    let at_least_56 = lt(&FpVar::constant(F::from(55u64)), &value)?;
     at_least_56.conditional_enforce_equal(&Boolean::TRUE, active)?;
 
     Ok(value)
-}
-
-/// `a < b` for small field elements, via bit decomposition of the difference.
-fn less_than_field<F: PrimeField>(a: &FpVar<F>, b: &FpVar<F>) -> Result<Boolean<F>, SynthesisError> {
-    use ark_r1cs_std::convert::ToBitsGadget;
-    // b - a - 1 is non-negative iff a < b. Decompose into 32 bits and require
-    // the value fits, which it does for all offsets and lengths here.
-    let diff = b - a;
-    let bits = diff.to_bits_le()?;
-    // If a >= b the difference wraps and the high bits are set.
-    let mut high_set = Boolean::FALSE;
-    for bit in bits.iter().skip(32) {
-        high_set = high_set | bit;
-    }
-    let is_zero = diff.is_eq(&FpVar::zero())?;
-    Ok(!high_set & !is_zero)
 }
 
 impl<F: PrimeField> RlpDecoder<F> for Cursor {
@@ -257,7 +241,7 @@ impl<F: PrimeField> RlpDecoder<F> for Cursor {
 
         // The item must fit inside the buffer.
         let end = &offset + &payload_len;
-        let fits = less_than_field(&end, &FpVar::constant(F::from((buf.len() + 1) as u64)))?;
+        let fits = lt(&end, &FpVar::constant(F::from((buf.len() + 1) as u64)))?;
         fits.conditional_enforce_equal(&Boolean::TRUE, active)?;
 
         Ok(Item {
@@ -285,7 +269,7 @@ impl<F: PrimeField> RlpDecoder<F> for Cursor {
             let child = Self::decode_item(buf, &cursor, active)?;
             // Containment: the child must not reach past the list's payload.
             let child_end = child.end();
-            let contained = less_than_field(&child_end, &(&list_end + FpVar::one()))?;
+            let contained = lt(&child_end, &(&list_end + FpVar::one()))?;
             contained.conditional_enforce_equal(&Boolean::TRUE, active)?;
             cursor = child_end;
             items.push(child);

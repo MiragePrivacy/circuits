@@ -60,7 +60,7 @@ impl Trie {
     /// Builds the trie over `values`, keyed by their positions.
     pub fn build(values: &[Vec<u8>]) -> Self {
         let mut nodes = HashMap::new();
-        let entries: Vec<(Vec<u8>, Vec<u8>)> = values
+        let entries: Vec<Entry> = values
             .iter()
             .enumerate()
             .map(|(i, v)| (nibbles(&key_for(i)), v.clone()))
@@ -149,10 +149,10 @@ fn child_ref(node: &Item, store: &mut HashMap<[u8; 32], Vec<u8>>) -> Item {
     Item::Str(h.to_vec())
 }
 
-fn build_node(
-    entries: &[(Vec<u8>, Vec<u8>)],
-    store: &mut HashMap<[u8; 32], Vec<u8>>,
-) -> Item {
+/// A remaining key path in nibbles, paired with the value it leads to.
+type Entry = (Vec<u8>, Vec<u8>);
+
+fn build_node(entries: &[Entry], store: &mut HashMap<[u8; 32], Vec<u8>>) -> Item {
     if entries.len() == 1 {
         let (path, value) = &entries[0];
         return Item::List(vec![
@@ -171,7 +171,7 @@ fn build_node(
         shared += 1;
     }
     if shared > 0 {
-        let stripped: Vec<(Vec<u8>, Vec<u8>)> = entries
+        let stripped: Vec<Entry> = entries
             .iter()
             .map(|(p, v)| (p[shared..].to_vec(), v.clone()))
             .collect();
@@ -184,7 +184,7 @@ fn build_node(
 
     // Otherwise a branch, split on the first nibble.
     let mut slots: Vec<Item> = vec![Item::empty(); 17];
-    let mut buckets: HashMap<u8, Vec<(Vec<u8>, Vec<u8>)>> = HashMap::new();
+    let mut buckets: HashMap<u8, Vec<Entry>> = HashMap::new();
     for (path, value) in entries {
         match path.split_first() {
             None => slots[16] = Item::str(value.clone()),
@@ -257,7 +257,7 @@ mod tests {
         let values: Vec<Vec<u8>> = (0..24u8).map(|i| vec![i; 64]).collect();
         let t = Trie::build(&values);
 
-        for i in 0..values.len() {
+        for (i, value) in values.iter().enumerate() {
             let proof = t.proof(&key_for(i)).unwrap();
             assert!(!proof.is_empty(), "empty proof for {i}");
 
@@ -268,10 +268,10 @@ mod tests {
             let last = decode_all(proof.last().unwrap()).unwrap();
             match last {
                 Item::List(items) if items.len() == 2 => {
-                    assert_eq!(items[1], Item::str(values[i].clone()), "leaf value {i}");
+                    assert_eq!(items[1], Item::str(value.clone()), "leaf value {i}");
                 }
                 Item::List(items) if items.len() == 17 => {
-                    assert_eq!(items[16], Item::str(values[i].clone()), "branch value {i}");
+                    assert_eq!(items[16], Item::str(value.clone()), "branch value {i}");
                 }
                 _ => panic!("proof {i} does not end at a value"),
             }

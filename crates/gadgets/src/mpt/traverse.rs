@@ -276,7 +276,7 @@ impl<F: PrimeField> MptVerifier<F> for Traversal {
             let after_finish = finished.clone() & active.clone();
             after_finish.enforce_equal(&Boolean::FALSE)?;
             profile(&level.bytes, "finish-check", &mut mark);
-            finished = finished | terminates;
+            finished |= terminates;
         }
 
         // The walk must have terminated somewhere.

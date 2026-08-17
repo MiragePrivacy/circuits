@@ -192,7 +192,7 @@ pub fn accepts_every_supported_envelope<R: ReceiptRelation<Fr>>() {
     let log = transfer_log(&TOKEN, &SENDER, &RECIPIENT, &amt);
 
     for prefix in [None, Some(0x01), Some(0x02), Some(0x03), Some(0x04)] {
-        let r = receipt(1, &[log.clone()], prefix);
+        let r = receipt(1, std::slice::from_ref(&log), prefix);
         assert!(
             accepts_genuine_intent::<R>(&r, 0, &amt),
             "rejected envelope {prefix:?}"
@@ -471,7 +471,7 @@ pub fn rejects_unsupported_envelope<R: ReceiptRelation<Fr>>() {
     let amt = amount(1);
     let log = transfer_log(&TOKEN, &SENDER, &RECIPIENT, &amt);
     for prefix in [0x00u8, 0x05, 0x7f] {
-        let r = receipt(1, &[log.clone()], Some(prefix));
+        let r = receipt(1, std::slice::from_ref(&log), Some(prefix));
         assert!(
             !accepts_genuine_intent::<R>(&r, 0, &amt),
             "accepted envelope type {prefix:#04x}"
@@ -711,7 +711,7 @@ fn log_walk_cost() {
 
     let it = intent(&TOKEN, &RECIPIENT, &amt, c.clone());
     let before_check = c.num_constraints();
-    let _ = super::log::assert_transfer(&buf, &log, &it, &Boolean::TRUE).unwrap();
+    super::log::assert_transfer(&buf, &log, &it, &Boolean::TRUE).unwrap();
     let check = c.num_constraints() - before_check;
 
     println!("envelope parse:   {env}");

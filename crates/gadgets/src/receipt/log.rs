@@ -63,7 +63,7 @@ pub fn select_log<F: PrimeField>(
     let mut selected = logs.clone();
     let mut in_range = Boolean::FALSE;
 
-    for i in 0..MAX_LOGS {
+    for is_selected in &hit {
         // This step is real only while the cursor is still inside the list.
         let within = lt(&cursor, &logs_end)?;
         let step_active = active.clone() & within.clone();
@@ -74,9 +74,8 @@ pub fn select_log<F: PrimeField>(
             .conditional_enforce_equal(&Boolean::TRUE, &step_active)?;
 
         // Is this the one?
-        let is_selected = hit[i].clone();
-        selected = select_item(&is_selected, &item, &selected)?;
-        in_range = Boolean::conditionally_select(&is_selected, &within, &in_range)?;
+        selected = select_item(is_selected, &item, &selected)?;
+        in_range = Boolean::conditionally_select(is_selected, &within, &in_range)?;
 
         cursor = FpVar::conditionally_select(&within, &item.end(), &cursor)?;
     }

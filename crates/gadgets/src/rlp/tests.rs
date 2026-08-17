@@ -79,9 +79,8 @@ fn receipt_fixture() -> Vec<u8> {
 ///
 /// A decoder may also signal rejection by returning `Err`; both count as
 /// rejection, since neither produces a proof.
-fn accepts<D, Body>(buf_bytes: &[u8], bound: usize, body: Body) -> bool
+fn accepts<Body>(buf_bytes: &[u8], bound: usize, body: Body) -> bool
 where
-    D: RlpDecoder<Fr>,
     Body: Fn(&[ark_r1cs_std::uint8::UInt8<Fr>], ConstraintSystemRef<Fr>) -> Result<(), SynthesisError>,
 {
     let c = cs();
@@ -147,7 +146,7 @@ pub fn accepts_receipt_shape<D: RlpDecoder<Fr>>() {
 pub fn rejects_non_minimal_single_byte<D: RlpDecoder<Fr>>() {
     let forged = vec![0x81, 0x7f];
     assert!(
-        !accepts::<D, _>(&forged, 64, |buf, c| {
+        !accepts(&forged, 64, |buf, c| {
             D::decode_item(buf, &f(c, 0), &Boolean::TRUE).map(|_| ())
         }),
         "accepted 0x81 0x7f for a byte below 0x80"
@@ -162,7 +161,7 @@ pub fn rejects_long_form_for_short_payload<D: RlpDecoder<Fr>>() {
     let mut forged = vec![0xb8, 0x05];
     forged.extend_from_slice(&[0xaa; 5]);
     assert!(
-        !accepts::<D, _>(&forged, 64, |buf, c| {
+        !accepts(&forged, 64, |buf, c| {
             D::decode_item(buf, &f(c, 0), &Boolean::TRUE).map(|_| ())
         }),
         "accepted long form for a payload short form can encode"
@@ -177,7 +176,7 @@ pub fn rejects_leading_zero_length<D: RlpDecoder<Fr>>() {
     let mut forged = vec![0xb9, 0x00, 0x40];
     forged.extend_from_slice(&[0xcc; 64]);
     assert!(
-        !accepts::<D, _>(&forged, 256, |buf, c| {
+        !accepts(&forged, 256, |buf, c| {
             D::decode_item(buf, &f(c, 0), &Boolean::TRUE).map(|_| ())
         }),
         "accepted a length with leading zeros"
@@ -191,7 +190,7 @@ pub fn rejects_leading_zero_length<D: RlpDecoder<Fr>>() {
 pub fn rejects_payload_past_buffer<D: RlpDecoder<Fr>>() {
     let forged = vec![0xb8, 200, 0xaa, 0xbb];
     assert!(
-        !accepts::<D, _>(&forged, 16, |buf, c| {
+        !accepts(&forged, 16, |buf, c| {
             D::decode_item(buf, &f(c, 0), &Boolean::TRUE).map(|_| ())
         }),
         "accepted a payload longer than the buffer"
@@ -207,7 +206,7 @@ pub fn rejects_payload_past_buffer<D: RlpDecoder<Fr>>() {
 pub fn rejects_wrong_child_count<D: RlpDecoder<Fr>>() {
     let three = enc_list(&[enc_str(&[1]), enc_str(&[2]), enc_str(&[3])]);
     assert!(
-        !accepts::<D, _>(&three, 512, |buf, c| {
+        !accepts(&three, 512, |buf, c| {
             D::decode_list(buf, &f(c, 0), 4, &Boolean::TRUE).map(|_| ())
         }),
         "accepted a three-item list where four were required"
@@ -221,7 +220,7 @@ pub fn rejects_wrong_child_count<D: RlpDecoder<Fr>>() {
         enc_str(&[5]),
     ]);
     assert!(
-        !accepts::<D, _>(&five, 512, |buf, c| {
+        !accepts(&five, 512, |buf, c| {
             D::decode_list(buf, &f(c, 0), 4, &Boolean::TRUE).map(|_| ())
         }),
         "accepted a five-item list where four were required"
@@ -242,7 +241,7 @@ pub fn rejects_untiled_list<D: RlpDecoder<Fr>>() {
     forged.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
 
     assert!(
-        !accepts::<D, _>(&forged, 512, |buf, c| {
+        !accepts(&forged, 512, |buf, c| {
             D::decode_list(buf, &f(c, 0), 2, &Boolean::TRUE).map(|_| ())
         }),
         "accepted a list whose children leave a gap"
@@ -260,7 +259,7 @@ pub fn rejects_child_escaping_parent<D: RlpDecoder<Fr>>() {
     forged.extend_from_slice(&[0xaa; 10]);
 
     assert!(
-        !accepts::<D, _>(&forged, 512, |buf, c| {
+        !accepts(&forged, 512, |buf, c| {
             D::decode_list(buf, &f(c, 0), 1, &Boolean::TRUE).map(|_| ())
         }),
         "accepted a child reaching past its parent's end"
@@ -275,7 +274,7 @@ pub fn rejects_child_escaping_parent<D: RlpDecoder<Fr>>() {
 pub fn rejects_string_as_list<D: RlpDecoder<Fr>>() {
     let s = enc_str(&[0xaa; 8]);
     assert!(
-        !accepts::<D, _>(&s, 512, |buf, c| {
+        !accepts(&s, 512, |buf, c| {
             D::decode_list(buf, &f(c, 0), 1, &Boolean::TRUE).map(|_| ())
         }),
         "accepted a string where a list was required"
@@ -304,7 +303,7 @@ pub fn tail_reads_are_the_callers_responsibility<D: RlpDecoder<Fr>>() {
     let bytes = enc_str(&[0xaa; 4]);
     // Reading at 40 in a zero tail yields an empty string, and that is correct
     // behaviour for a decoder with no length parameter.
-    let accepted = accepts::<D, _>(&bytes, 64, |buf, c| {
+    let accepted = accepts(&bytes, 64, |buf, c| {
         D::decode_item(buf, &f(c, 40), &Boolean::TRUE).map(|_| ())
     });
     assert!(

@@ -159,7 +159,7 @@ pub fn open<F: PrimeField>(
     let zero = UInt8::constant(0);
     let mut token_is_zero = Boolean::TRUE;
     for byte in &opening.settlement_token {
-        token_is_zero = token_is_zero & byte.is_eq(&zero)?;
+        token_is_zero &= byte.is_eq(&zero)?;
     }
     token_is_zero.conditional_enforce_equal(&is_native, active)?;
 
@@ -167,14 +167,14 @@ pub fn open<F: PrimeField>(
     // a settlement.
     let mut recipient_is_zero = Boolean::TRUE;
     for byte in &opening.recipient {
-        recipient_is_zero = recipient_is_zero & byte.is_eq(&zero)?;
+        recipient_is_zero &= byte.is_eq(&zero)?;
     }
     recipient_is_zero.conditional_enforce_equal(&Boolean::FALSE, active)?;
 
     // The amount is greater than zero.
     let mut amount_is_zero = Boolean::TRUE;
     for byte in &opening.settlement_amount {
-        amount_is_zero = amount_is_zero & byte.is_eq(&zero)?;
+        amount_is_zero &= byte.is_eq(&zero)?;
     }
     amount_is_zero.conditional_enforce_equal(&Boolean::FALSE, active)?;
 
@@ -354,7 +354,7 @@ mod tests {
         let opening = alloc(cs.clone(), &i);
         let c = alloc_bounded(cs.clone(), &i.commitment(), 32).unwrap();
         let before = cs.num_constraints();
-        let _ = open(&opening, &c, &Boolean::TRUE).unwrap();
+        open(&opening, &c, &Boolean::TRUE).unwrap();
         println!(
             "commitment open ({PREIMAGE_LEN} byte preimage): {} constraints",
             cs.num_constraints() - before
