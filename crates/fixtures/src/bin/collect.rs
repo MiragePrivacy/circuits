@@ -20,10 +20,11 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
+use mirage_fixtures::chain::{encode_header, encode_receipt, is_direct_transfer, receipt_type};
 use mirage_fixtures::commitment;
-use mirage_fixtures::rlp::Item;
+
 use mirage_fixtures::trie::{key_for, Trie};
-use mirage_fixtures::{from_hex, from_hex_fixed, from_hex_quantity, hash, hex_str, Dataset, Fixture};
+use mirage_fixtures::{from_hex, from_hex_fixed, hash, hex_str, Dataset, Fixture};
 use serde_json::Value;
 
 /// Default endpoint. Override with `--rpc`.
@@ -34,7 +35,6 @@ use serde_json::Value;
 /// historical strides. Variety comes from block spacing, not from reaching deep
 /// history.
 const RPC: &str = "https://eth.drpc.org";
-const TRANSFER_TOPIC0: &str = "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -144,125 +144,6 @@ fn rpc(url: &str, method: &str, params: Vec<Value>) -> Result<Value, String> {
     Err(format!("{method} failed: {last}"))
 }
 
-/// Re-encodes the 21-field post-Prague header, spec 12.7.1.
-fn encode_header(h: &Value) -> Result<Vec<u8>, String> {
-    let f = |k: &str| -> Result<&str, String> {
-        h.get(k).and_then(|v| v.as_str()).ok_or_else(|| format!("header missing {k}"))
-    };
-    let fixed = |k: &str, n: usize| -> Result<Item, String> {
-        Ok(Item::Str(from_hex_fixed(f(k)?, n)?))
-    };
-    let qty = |k: &str| -> Result<Item, String> { Ok(Item::Str(from_hex_quantity(f(k)?)?)) };
-
-    let extra = from_hex(f("extraData")?)?;
-
-    Ok(Item::List(vec![
-        fixed("parentHash", 32)?,
-        fixed("sha3Uncles", 32)?,
-        fixed("miner", 20)?,
-        fixed("stateRoot", 32)?,
-        fixed("transactionsRoot", 32)?,
-        fixed("receiptsRoot", 32)?,
-        fixed("logsBloom", 256)?,
-        qty("difficulty")?,
-        qty("number")?,
-        qty("gasLimit")?,
-        qty("gasUsed")?,
-        qty("timestamp")?,
-        Item::Str(extra),
-        fixed("mixHash", 32)?,
-        fixed("nonce", 8)?,
-        qty("baseFeePerGas")?,
-        fixed("withdrawalsRoot", 32)?,
-        qty("blobGasUsed")?,
-        qty("excessBlobGas")?,
-        fixed("parentBeaconBlockRoot", 32)?,
-        fixed("requestsHash", 32)?,
-    ])
-    .encode())
-}
-
-/// The receipt as it appears in the trie, envelope included.
-fn encode_receipt(r: &Value) -> Result<Vec<u8>, String> {
-    let logs: Result<Vec<Item>, String> = r
-        .get("logs")
-        .and_then(|v| v.as_array())
-        .ok_or("receipt missing logs")?
-        .iter()
-        .map(|log| {
-            let addr = from_hex_fixed(log["address"].as_str().ok_or("log address")?, 20)?;
-            let topics: Result<Vec<Item>, String> = log["topics"]
-                .as_array()
-                .ok_or("log topics")?
-                .iter()
-                .map(|t| Ok(Item::Str(from_hex_fixed(t.as_str().ok_or("topic")?, 32)?)))
-                .collect();
-            let data = from_hex(log["data"].as_str().unwrap_or("0x"))?;
-            Ok(Item::List(vec![
-                Item::Str(addr),
-                Item::List(topics?),
-                Item::Str(data),
-            ]))
-        })
-        .collect();
-
-    let status = u64::from_str_radix(
-        r["status"].as_str().ok_or("status")?.trim_start_matches("0x"),
-        16,
-    )
-    .map_err(|e| e.to_string())?;
-    let gas = u64::from_str_radix(
-        r["cumulativeGasUsed"].as_str().ok_or("gas")?.trim_start_matches("0x"),
-        16,
-    )
-    .map_err(|e| e.to_string())?;
-
-    let payload = Item::List(vec![
-        Item::int(status),
-        Item::int(gas),
-        Item::Str(from_hex_fixed(r["logsBloom"].as_str().ok_or("bloom")?, 256)?),
-        Item::List(logs?),
-    ])
-    .encode();
-
-    let tx_type = r
-        .get("type")
-        .and_then(|v| v.as_str())
-        .map(|s| u8::from_str_radix(s.trim_start_matches("0x"), 16).unwrap_or(0))
-        .unwrap_or(0);
-
-    Ok(if tx_type == 0 {
-        payload
-    } else {
-        let mut out = vec![tx_type];
-        out.extend_from_slice(&payload);
-        out
-    })
-}
-
-/// One Transfer log and nothing else: a direct ERC-20 transfer call.
-fn is_direct_transfer(r: &Value) -> bool {
-    let logs = match r.get("logs").and_then(|v| v.as_array()) {
-        Some(l) => l,
-        None => return false,
-    };
-    if logs.len() != 1 {
-        return false;
-    }
-    let topics = match logs[0].get("topics").and_then(|v| v.as_array()) {
-        Some(t) => t,
-        None => return false,
-    };
-    let status_ok = r["status"].as_str() == Some("0x1");
-    let data_len = from_hex(logs[0]["data"].as_str().unwrap_or("0x"))
-        .map(|d| d.len())
-        .unwrap_or(0);
-
-    status_ok
-        && topics.len() == 3
-        && topics[0].as_str().unwrap_or("").trim_start_matches("0x").eq_ignore_ascii_case(TRANSFER_TOPIC0)
-        && data_len == 32
-}
 
 fn collect_block(url: &str, number: u64, want: usize) -> Result<Vec<Fixture>, String> {
     let tag = Value::String(format!("0x{number:x}"));
@@ -330,11 +211,7 @@ fn collect_block(url: &str, number: u64, want: usize) -> Result<Vec<Fixture>, St
             tx_hash: tx_hash_hex.into(),
             block_number: number,
             tx_index: i,
-            receipt_type: r
-                .get("type")
-                .and_then(|v| v.as_str())
-                .map(|s| u8::from_str_radix(s.trim_start_matches("0x"), 16).unwrap_or(0))
-                .unwrap_or(0),
+            receipt_type: receipt_type(r),
             log_index: 0,
             header: hex_str(&header),
             receipts_root: receipts_root.into(),

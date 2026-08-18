@@ -20,16 +20,14 @@
 
 use std::path::PathBuf;
 
-use ark_bn254::{Bn254, Fr};
-use ark_groth16::{Groth16, Proof, VerifyingKey};
-use ark_snark::SNARK;
-use ark_std::rand::SeedableRng;
+use ark_bn254::Bn254;
+use ark_groth16::VerifyingKey;
 use taceo_groth16_sol::{SolidityVerifierConfig, SolidityVerifierContext};
 
-use mirage_relation::{fixture, public_signals, Bounds, ReceiptCircuit};
-
+use mirage_relation::{fixture, Bounds};
 fn main() {
     // CARGO_MANIFEST_DIR is `crates/prover`, so reaching the repo's
+
     // `contracts/` takes two levels up, not one.
     let out = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../contracts");
     std::fs::create_dir_all(&out).expect("create contracts/");
@@ -42,13 +40,11 @@ fn main() {
     // rendered below is structurally identical either way, so the size and gas
     // measurements hold; only the key's provenance differs.
     eprintln!("setup...");
-    let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(0);
-    let (pk, vk) = Groth16::<Bn254>::circuit_specific_setup(ReceiptCircuit::setup(bounds), &mut rng)
-        .expect("setup");
+    let keys = mirage_prover::setup(bounds, 0).expect("setup");
 
     // The contract.
     eprintln!("rendering verifier...");
-    let contract = render(&vk);
+    let contract = render(&keys.vk);
     let sol_path = out.join("Verifier.sol");
     std::fs::write(&sol_path, &contract).expect("write Verifier.sol");
     eprintln!(
@@ -58,23 +54,16 @@ fn main() {
     );
 
     // A real proof, so the contract can be exercised rather than merely
-    // compiled.
+    // compiled. `prove` verifies natively before returning: a contract test
+    // that fails is ambiguous unless the proof is known good.
     eprintln!("proving...");
-    let proof = Groth16::<Bn254>::prove(&pk, ReceiptCircuit::prove(bounds, witness.clone()), &mut rng)
-        .expect("prove");
-    let (hi, lo) = public_signals(&witness);
+    let settlement = mirage_prover::prove_seeded(&keys, bounds, &witness, 0).expect("prove");
+    let [hi, lo] = settlement.signals;
 
-    // Verify natively first: a contract test that fails is ambiguous unless the
-    // proof is known good.
-    assert!(
-        Groth16::<Bn254>::verify(&vk, &[Fr::from(hi), Fr::from(lo)], &proof).expect("verify"),
-        "the proof does not verify natively; the Solidity test would be meaningless"
-    );
-
-    let json = proof_json(&proof, hi, lo, &witness);
+    let json = proof_json(&settlement.proof, hi, lo, &witness);
     std::fs::write(out.join("proof.json"), &json).expect("write proof.json");
 
-    let calldata = calldata(&proof, hi, lo);
+    let calldata = calldata(&settlement.proof, hi, lo);
     std::fs::write(out.join("calldata.txt"), &calldata).expect("write calldata.txt");
 
     eprintln!("\n{}", calldata);
@@ -96,51 +85,9 @@ fn render(vk: &VerifyingKey<Bn254>) -> String {
     .expect("render template")
 }
 
-/// The proof as the eight field elements the Solidity verifier expects.
-///
-/// # Why this reads coordinates rather than serialized bytes
-///
-/// An earlier version serialized each point and sliced the buffer, which
-/// required knowing arkworks' byte order, its endianness, and where each
-/// coordinate sits. Three assumptions, each invisible when wrong: the contract
-/// simply rejects every valid proof.
-///
-/// Reading `x` and `y` off the affine point and converting through `BigUint`
-/// removes all three. `BigUint::to_bytes_be` is unambiguous, and the field
-/// elements are what the precompile consumes.
-///
-/// The one convention that remains is G2 coordinate order: the EVM pairing
-/// precompile takes `(x.c1, x.c0, y.c1, y.c0)`, confirmed against the generated
-/// verifier's assembly, which stores `X_1` before `X_0`.
-fn proof_points(proof: &Proof<Bn254>) -> [String; 8] {
-    use ark_ff::PrimeField;
-    use num_bigint::BigUint;
 
-    let fq = |v: ark_bn254::Fq| -> String {
-        let n: BigUint = v.into_bigint().into();
-        let mut be = n.to_bytes_be();
-        // Left-pad to a full 32-byte word.
-        while be.len() < 32 {
-            be.insert(0, 0);
-        }
-        format!("0x{}", hex::encode(be))
-    };
-
-    [
-        fq(proof.a.x),
-        fq(proof.a.y),
-        // G2 coordinates are in Fq2; the precompile wants c1 before c0.
-        fq(proof.b.x.c1),
-        fq(proof.b.x.c0),
-        fq(proof.b.y.c1),
-        fq(proof.b.y.c0),
-        fq(proof.c.x),
-        fq(proof.c.y),
-    ]
-}
-
-fn proof_json(proof: &Proof<Bn254>, hi: u128, lo: u128, w: &mirage_relation::Witness) -> String {
-    let p = proof_points(proof);
+fn proof_json(proof: &[[u8; 32]; 8], hi: u128, lo: u128, w: &mirage_relation::Witness) -> String {
+    let p = proof.map(|w| format!("0x{}", hex::encode(w)));
     let s = &w.statement;
     let hx = |b: &[u8]| format!("0x{}", hex::encode(b));
     format!(
@@ -188,8 +135,8 @@ fn proof_json(proof: &Proof<Bn254>, hi: u128, lo: u128, w: &mirage_relation::Wit
     )
 }
 
-fn calldata(proof: &Proof<Bn254>, hi: u128, lo: u128) -> String {
-    let p = proof_points(proof);
+fn calldata(proof: &[[u8; 32]; 8], hi: u128, lo: u128) -> String {
+    let p = proof.map(|w| format!("0x{}", hex::encode(w)));
     format!(
         "verifyProof(\n  [{}, {}],\n  [[{}, {}], [{}, {}]],\n  [{}, {}],\n  [0x{:032x}, 0x{:032x}]\n)",
         p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], hi, lo

@@ -37,3 +37,7 @@ parallel = [
     "ark-ec/parallel",
     "ark-std/parallel",
 ]
+
+[lib]
+name = "mirage_prover"
+path = "src/lib.rs"

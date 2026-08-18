@@ -11,6 +11,7 @@
 //! `receiptsRoot`, which is a single equality that catches every one of those
 //! independently. A block that fails is dropped rather than written.
 
+pub mod chain;
 pub mod commitment;
 pub mod rlp;
 pub mod trie;
