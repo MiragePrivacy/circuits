@@ -4,13 +4,19 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lib]
+name = "mirage_prover"
+path = "src/lib.rs"
+
 [[bin]]
 name = "measure"
 path = "src/bin/measure.rs"
+required-features = ["export"]
 
 [[bin]]
 name = "export-verifier"
 path = "src/bin/export_verifier.rs"
+required-features = ["export"]
 
 [dependencies]
 ark-groth16.workspace = true
@@ -20,24 +26,26 @@ ark-ff.workspace = true
 ark-ec.workspace = true
 ark-relations.workspace = true
 ark-serialize.workspace = true
-ark-std = { workspace = true, features = ["print-trace"] }
+ark-std.workspace = true
 mirage-relation = { path = "../relation" }
-hex.workspace = true
-num-bigint = "0.4"
+num-bigint = { version = "0.4", default-features = false }
+hex = { workspace = true, optional = true }
 # Renders the Solidity verifier from gnark's template. Builds against
 # ark-groth16 0.6, the same version this workspace pins, so the verifying key
-# passes through without conversion.
-taceo-groth16-sol = "0.4.2"
+# passes through without conversion. Optional: it is a host-side reporting
+# dependency and has no place in an enclave image.
+taceo-groth16-sol = { version = "0.4.2", optional = true }
 
 [features]
-default = ["parallel"]
+default = ["export", "parallel"]
+# The binaries: Solidity rendering, trace printing, hex reporting. Off for an
+# enclave build, which needs only the proving path.
+export = ["dep:taceo-groth16-sol", "dep:hex", "ark-std/print-trace"]
+# Rayon-backed multicore proving. Off by default under Fortanix EDP, where
+# thread spawning is constrained by the enclave's provisioned TCS count.
 parallel = [
     "ark-groth16/parallel",
     "ark-ff/parallel",
     "ark-ec/parallel",
     "ark-std/parallel",
 ]
-
-[lib]
-name = "mirage_prover"
-path = "src/lib.rs"
