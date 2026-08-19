@@ -127,6 +127,263 @@ pub fn encode_receipt(r: &Value) -> Result<Vec<u8>, String> {
     })
 }
 
+/// The transaction as it appears in the transaction trie, EIP-2718 envelope
+/// included.
+///
+/// `tx` is one entry of an `eth_getBlockByNumber(.., true)` result. The layouts
+/// are consensus-frozen per type, and the signature fields are part of the
+/// encoding: a transaction without them does not hash to its trie entry.
+///
+/// ```text
+/// legacy   (0x00)  [nonce, gasPrice, gasLimit, to, value, data, v, r, s]
+/// 2930     (0x01)  [chainId, nonce, gasPrice, gasLimit, to, value, data,
+///                   accessList, yParity, r, s]
+/// 1559     (0x02)  [chainId, nonce, maxPriorityFeePerGas, maxFeePerGas,
+///                   gasLimit, to, value, data, accessList, yParity, r, s]
+/// 4844     (0x03)  1559 fields + [maxFeePerBlobGas, blobVersionedHashes]
+///                   before yParity
+/// 7702     (0x04)  1559 fields + [authorizationList] before yParity
+/// ```
+///
+/// Types `0x03` and `0x04` are encoded even though the native relation rejects
+/// them: the trie contains every transaction in the block, so rebuilding the
+/// root requires encoding all of them. Whether a *settlement* may use one is a
+/// separate question the collector's filter answers.
+pub fn encode_transaction(tx: &Value) -> Result<Vec<u8>, String> {
+    let f = |k: &str| -> Result<&str, String> {
+        tx.get(k)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| format!("transaction missing {k}"))
+    };
+    let qty = |k: &str| -> Result<Item, String> { Ok(Item::Str(from_hex_quantity(f(k)?)?)) };
+
+    // `to` is a 20-byte address, or the empty string for a contract creation.
+    let to = match tx.get("to").and_then(|v| v.as_str()) {
+        Some(a) => Item::Str(from_hex_fixed(a, 20)?),
+        None => Item::empty(),
+    };
+    let data = Item::Str(from_hex(f("input")?)?);
+    let value = Item::Str(from_hex_quantity(f("value")?)?);
+
+    // Signature. `r` and `s` are quantities, not fixed-width: a leading zero
+    // byte would change the hash.
+    let r = Item::Str(from_hex_quantity(f("r")?)?);
+    let s = Item::Str(from_hex_quantity(f("s")?)?);
+
+    let ty = transaction_type(tx);
+    let payload = match ty {
+        0 => Item::List(vec![
+            qty("nonce")?,
+            qty("gasPrice")?,
+            qty("gas")?,
+            to,
+            value,
+            data,
+            Item::Str(from_hex_quantity(f("v")?)?),
+            r,
+            s,
+        ]),
+        1 => Item::List(vec![
+            qty("chainId")?,
+            qty("nonce")?,
+            qty("gasPrice")?,
+            qty("gas")?,
+            to,
+            value,
+            data,
+            encode_access_list(tx)?,
+            y_parity(tx)?,
+            r,
+            s,
+        ]),
+        2 => Item::List(vec![
+            qty("chainId")?,
+            qty("nonce")?,
+            qty("maxPriorityFeePerGas")?,
+            qty("maxFeePerGas")?,
+            qty("gas")?,
+            to,
+            value,
+            data,
+            encode_access_list(tx)?,
+            y_parity(tx)?,
+            r,
+            s,
+        ]),
+        3 => Item::List(vec![
+            qty("chainId")?,
+            qty("nonce")?,
+            qty("maxPriorityFeePerGas")?,
+            qty("maxFeePerGas")?,
+            qty("gas")?,
+            to,
+            value,
+            data,
+            encode_access_list(tx)?,
+            qty("maxFeePerBlobGas")?,
+            Item::List(
+                tx.get("blobVersionedHashes")
+                    .and_then(|v| v.as_array())
+                    .map(|hs| {
+                        hs.iter()
+                            .map(|h| {
+                                Ok(Item::Str(from_hex_fixed(
+                                    h.as_str().ok_or("blob hash")?,
+                                    32,
+                                )?))
+                            })
+                            .collect::<Result<Vec<Item>, String>>()
+                    })
+                    .transpose()?
+                    .unwrap_or_default(),
+            ),
+            y_parity(tx)?,
+            r,
+            s,
+        ]),
+        4 => Item::List(vec![
+            qty("chainId")?,
+            qty("nonce")?,
+            qty("maxPriorityFeePerGas")?,
+            qty("maxFeePerGas")?,
+            qty("gas")?,
+            to,
+            value,
+            data,
+            encode_access_list(tx)?,
+            encode_authorization_list(tx)?,
+            y_parity(tx)?,
+            r,
+            s,
+        ]),
+        t => return Err(format!("unsupported transaction type {t:#04x}")),
+    };
+
+    let encoded = payload.encode();
+    Ok(match ty {
+        0 => encoded,
+        t => {
+            let mut out = vec![t];
+            out.extend_from_slice(&encoded);
+            out
+        }
+    })
+}
+
+/// `yParity`, falling back to `v` for nodes that only report the latter.
+fn y_parity(tx: &Value) -> Result<Item, String> {
+    let s = tx
+        .get("yParity")
+        .and_then(|v| v.as_str())
+        .or_else(|| tx.get("v").and_then(|v| v.as_str()))
+        .ok_or("transaction missing yParity")?;
+    Ok(Item::Str(from_hex_quantity(s)?))
+}
+
+/// `[[address, [storageKeys...]], ...]`.
+fn encode_access_list(tx: &Value) -> Result<Item, String> {
+    let entries = match tx.get("accessList").and_then(|v| v.as_array()) {
+        Some(l) => l,
+        None => return Ok(Item::List(vec![])),
+    };
+    let items: Result<Vec<Item>, String> = entries
+        .iter()
+        .map(|e| {
+            let addr = from_hex_fixed(e["address"].as_str().ok_or("access address")?, 20)?;
+            let keys: Result<Vec<Item>, String> = e["storageKeys"]
+                .as_array()
+                .ok_or("storageKeys")?
+                .iter()
+                .map(|k| Ok(Item::Str(from_hex_fixed(k.as_str().ok_or("key")?, 32)?)))
+                .collect();
+            Ok(Item::List(vec![Item::Str(addr), Item::List(keys?)]))
+        })
+        .collect();
+    Ok(Item::List(items?))
+}
+
+/// EIP-7702 `[[chainId, address, nonce, yParity, r, s], ...]`.
+fn encode_authorization_list(tx: &Value) -> Result<Item, String> {
+    let entries = match tx.get("authorizationList").and_then(|v| v.as_array()) {
+        Some(l) => l,
+        None => return Ok(Item::List(vec![])),
+    };
+    let q = |e: &Value, k: &str| -> Result<Item, String> {
+        Ok(Item::Str(from_hex_quantity(
+            e.get(k).and_then(|v| v.as_str()).ok_or("authorization")?,
+        )?))
+    };
+    let items: Result<Vec<Item>, String> = entries
+        .iter()
+        .map(|e| {
+            Ok(Item::List(vec![
+                q(e, "chainId")?,
+                Item::Str(from_hex_fixed(
+                    e["address"].as_str().ok_or("authorization address")?,
+                    20,
+                )?),
+                q(e, "nonce")?,
+                q(e, "yParity")?,
+                q(e, "r")?,
+                q(e, "s")?,
+            ]))
+        })
+        .collect();
+    Ok(Item::List(items?))
+}
+
+/// The EIP-2718 envelope type, 0 for legacy.
+pub fn transaction_type(tx: &Value) -> u8 {
+    tx.get("type")
+        .and_then(|v| v.as_str())
+        .map(|s| u8::from_str_radix(s.trim_start_matches("0x"), 16).unwrap_or(0))
+        .unwrap_or(0)
+}
+
+/// A native ETH settlement: a transaction moving nonzero value whose receipt
+/// succeeded.
+///
+/// `data` is deliberately not required to be empty. The relation leaves it
+/// unconstrained, because what the escrow owes is delivery of ETH to the
+/// recipient and value attached to a call delivers it exactly as a bare send
+/// does. Requiring `0x` here would collect a fixture set narrower than the
+/// circuit accepts, hiding whichever bound a call's larger payload exercises.
+///
+/// The envelope set is the relation's, not the receipt's: types `0x03` and
+/// `0x04` are rejected even though the trie may contain them.
+pub fn is_native_transfer(tx: &Value, receipt: &Value) -> bool {
+    if receipt["status"].as_str() != Some("0x1") {
+        return false;
+    }
+    // Legacy, EIP-2930, EIP-1559. Blob and set-code are excluded.
+    if !matches!(transaction_type(tx), 0..=2) {
+        return false;
+    }
+    // A creation delivers to nobody.
+    if tx.get("to").and_then(|v| v.as_str()).is_none() {
+        return false;
+    }
+    // Nonzero value: spec 12.3 rejects a zero settlement amount, and a
+    // zero-value call is not a payment.
+    from_hex_quantity(tx.get("value").and_then(|v| v.as_str()).unwrap_or("0x"))
+        .map(|v| !v.is_empty())
+        .unwrap_or(false)
+}
+
+/// Whether a native settlement carries calldata.
+///
+/// Both shapes are provable and both must be represented. A bare send is what
+/// spec 20.3's direct-settlement policy produces; a call carrying value is what
+/// a recipient contract with a `receive()` hook produces, and its receipt may
+/// carry any number of logs. The two differ by an order of magnitude in size,
+/// so a fixture set of only one kind would set the bounds wrong.
+pub fn is_bare_send(tx: &Value) -> bool {
+    tx.get("input")
+        .and_then(|v| v.as_str())
+        .map(|s| s == "0x" || s.is_empty())
+        .unwrap_or(true)
+}
+
 /// The EIP-2718 envelope type, 0 for legacy.
 pub fn receipt_type(r: &Value) -> u8 {
     r.get("type")
