@@ -563,3 +563,160 @@ fn bounds_note() {
         bare_max(&|f| f.max_receipt_node_bytes.max(f.max_transaction_node_bytes)),
     );
 }
+
+/// What the compiled bounds cost, and what a keccak-aligned bound would save.
+///
+/// `keccak256_var` runs `max / 136 + 1` permutations over a buffer regardless of
+/// the real length, so a bound is not a smooth dial: it steps at every multiple
+/// of the 136-byte rate. `node_bytes = 544` is exactly `4 * 136`, which lands
+/// one byte into a fifth block and pays a whole extra permutation per node per
+/// trie — and the native relation walks two tries.
+///
+/// A report, not an assertion. The saving is real, but changing a compiled
+/// bound is a new circuit version under spec 18.4.
+#[test]
+fn keccak_alignment_of_the_node_bound() {
+    let Some(d) = load() else {
+        return;
+    };
+    let observed = d
+        .fixtures
+        .iter()
+        .filter(|f| f.bare_send)
+        .map(|f| f.max_transaction_node_bytes.max(f.max_receipt_node_bytes))
+        .max()
+        .unwrap_or(0);
+
+    let smallest = d
+        .fixtures
+        .iter()
+        .filter(|f| f.bare_send)
+        .min_by_key(|f| f.receipt_bytes)
+        .expect("a bare send");
+
+    eprintln!("node bound vs keccak blocks (observed max node {observed} bytes):");
+    let mut baseline = 0usize;
+    for node_bytes in [544usize, 543, 536] {
+        if node_bytes < observed {
+            eprintln!("  {node_bytes:4} -> below the observed max, skipped");
+            continue;
+        }
+        let d0 = NativeBounds::default();
+        let b = NativeBounds {
+            common: Bounds {
+                node_bytes,
+                ..d0.common
+            },
+            transaction_node_bytes: node_bytes,
+            ..d0
+        };
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        NativeCircuit::prove(b, witness(smallest))
+            .generate_constraints(cs.clone())
+            .expect("synthesis");
+        let n = cs.num_constraints();
+        if baseline == 0 {
+            baseline = n;
+        }
+        let saved = if n < baseline {
+            format!(
+                "  ({:.1}% saved)",
+                100.0 * (baseline - n) as f64 / baseline as f64
+            )
+        } else {
+            String::new()
+        };
+        eprintln!(
+            "  {node_bytes:4} -> {} permutations, {n:>10} constraints{saved}",
+            node_bytes / 136 + 1,
+        );
+        assert!(
+            cs.is_satisfied().unwrap(),
+            "unsatisfied at node bound {node_bytes}"
+        );
+    }
+}
+
+/// Every buffer bound, aligned to the keccak rate.
+///
+/// Because cost steps at each multiple of 136 rather than rising smoothly, the
+/// cheapest bound covering a given maximum is the **largest** value in that
+/// block — headroom up to the next boundary is free. The compiled bounds were
+/// chosen as round decimal numbers, so each sits just past a step and pays for
+/// a permutation it does not use.
+///
+/// Aligning all four keeps at least as much headroom as today everywhere except
+/// the transaction buffer, which drops from 512 to 407 while still holding
+/// 3.3x the observed 122-byte maximum.
+#[test]
+fn keccak_aligned_bounds() {
+    let Some(d) = load() else {
+        return;
+    };
+    let smallest = d
+        .fixtures
+        .iter()
+        .filter(|f| f.bare_send)
+        .min_by_key(|f| f.receipt_bytes)
+        .expect("a bare send");
+
+    let base = NativeBounds::default();
+    // Largest value in the same block as each observed maximum:
+    //   node 532 -> 543, receipt 393 -> 407, header 652 -> 679, tx 122 -> 407
+    // The transaction buffer keeps 407 rather than 135 so a settlement with a
+    // long access list still fits; it costs the same 3 permutations as 393.
+    let aligned = NativeBounds {
+        common: Bounds {
+            node_bytes: 543,
+            receipt_bytes: 407,
+            header_bytes: 679,
+            ..base.common
+        },
+        transaction_bytes: 407,
+        transaction_node_bytes: 543,
+        ..base
+    };
+
+    let measure = |b: NativeBounds| {
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        NativeCircuit::prove(b, witness(smallest))
+            .generate_constraints(cs.clone())
+            .expect("synthesis");
+        assert!(cs.is_satisfied().unwrap(), "unsatisfied");
+        cs.num_constraints()
+    };
+
+    let now = measure(base);
+    let then = measure(aligned);
+    eprintln!(
+        "compiled bounds:  {now:>10} constraints  (node 544, receipt 512, header 704, tx 512)\n\
+         keccak-aligned:   {then:>10} constraints  (node 543, receipt 407, header 679, tx 407)\n\
+         saving:           {:>10} ({:.1}%), ~{:.0} GB at 2.8 GB/M",
+        now - then,
+        100.0 * (now - then) as f64 / now as f64,
+        (now - then) as f64 / 1e6 * 2.8
+    );
+
+    // Depth is the other multiplier on the dominant term. Both tries are keyed
+    // by `rlp(transactionIndex)` over the same entry count, so they always have
+    // the same depth: observed 2 to 3 against a compiled 4.
+    //
+    // Not a recommendation. Depth 4 holds 65,536 entries and depth 3 only
+    // 4,096; blocks do not reach either today, but this is the bound where
+    // being wrong makes a settlement unprovable at the executor's expense, so
+    // the headroom is bought deliberately. Measured here so the price is known.
+    let deep = measure(aligned);
+    let shallow = measure(NativeBounds {
+        common: Bounds {
+            depth: 3,
+            ..aligned.common
+        },
+        transaction_depth: 3,
+        ..aligned
+    });
+    eprintln!(
+        "\ndepth 4 -> 3 (on top of alignment): {} saved ({:.1}%), leaving {shallow}",
+        deep - shallow,
+        100.0 * (deep - shallow) as f64 / deep as f64
+    );
+}

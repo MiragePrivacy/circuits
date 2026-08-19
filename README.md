@@ -178,6 +178,74 @@ The trade is that a settlement attaching calldata becomes unprovable, and spec
 12.9 puts that on the executor. That is the right side to fail on, because the
 alternative fails after the executor has already paid.
 
+### Where the constraints are, and what is recoverable
+
+Measured, not projected. Per traversal level at a 544-byte node bound:
+
+| Sub-step | Constraints | Share |
+|---|---|---|
+| `link-hash` (keccak of the node) | 795,524 | 62% |
+| `decoders` (branch + short) | 225,519 | 18% |
+| `tail-read` | 135,845 | 11% |
+| `is_branch` | 72,649 | 6% |
+| everything else | ~57,000 | 4% |
+
+The native relation walks two tries, so the traversal is ~76% of the whole
+circuit and node hashing is ~47% of it. Reproduce with
+`MPT_PROFILE=1 cargo test -p mirage-gadgets --release traverse::tests::profile
+-- --nocapture`.
+
+**The bounds are misaligned with the keccak rate, and fixing that is free.**
+`keccak256_var` runs `max / 136 + 1` permutations regardless of the real length,
+so cost *steps* at every multiple of 136 rather than rising smoothly. A bound is
+therefore cheapest at the **largest** value inside its block — headroom up to
+the next boundary costs nothing. The compiled bounds are round decimal numbers,
+so each sits just past a step:
+
+| Bound | Now | Blocks | Aligned | Same blocks |
+|---|---|---|---|---|
+| `node_bytes` | 544 | 5 | **543** | 4 |
+| `receipt_bytes` | 512 | 4 | **407** | 3 |
+| `header_bytes` | 704 | 6 | **679** | 5 |
+| `transaction_bytes` | 512 | 4 | **407** | 3 |
+
+`node_bytes = 544` is exactly `4 x 136`, landing one byte into a fifth block and
+paying a whole extra permutation per node per trie for no headroom at all.
+
+Measured by `keccak_aligned_bounds`, with all 100 bare sends still inside every
+aligned bound:
+
+| | Constraints | |
+|---|---|---|
+| compiled today | 17,842,875 | |
+| keccak-aligned | 15,839,284 | **-11.2%**, ~6 GB |
+| and depth 4 → 3 | 13,595,528 | **-24%** total |
+
+The alignment is free: no soundness change, no new gadget code, no headroom
+lost. The depth reduction is **not** recommended on this evidence — depth 4
+holds 65,536 trie entries against depth 3's 4,096, and this is exactly the bound
+where being wrong makes a settlement unprovable at the executor's expense. It is
+measured so the price of that headroom is known, not to argue for spending it.
+
+Neither is applied here: changing a compiled bound is a new circuit version
+under spec 18.4, so it belongs with the setup and verifier regeneration rather
+than in a measurement commit.
+
+Beyond the bounds, node hashing is the only term large enough to matter. Two
+things that look like savings and are not:
+
+- **Sharing work between the two tries.** They are keyed identically and always
+  have the same depth, so the nibble path, flags, and consumption tracking are
+  computed twice. That is only 56,551 per level — 4.4% — so deduplicating it
+  saves ~226k, roughly 1.3%. Real but not worth the coupling.
+- **Sharing digests.** Not available at all: the tries hold different values, so
+  no node is common to both.
+
+What would actually move the number is a cheaper variable-length keccak, since
+the 795k per node is ~153k per block times five blocks plus selection overhead.
+That is a gadget-level project against a primitive already checked against
+ZoKrates' reference, not a bounds change.
+
 ### What is not done
 
 - **No exported verifier.** `contracts/` holds the ERC-20 verifier only.
