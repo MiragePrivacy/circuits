@@ -235,10 +235,15 @@ fn accepts_a_value_at_the_bare_byte_boundary() {
     }
 }
 
-/// Value is unconstrained in `data`, so a call carrying ETH still settles.
-/// What the escrow owes is delivery, and value attached to a call delivers it.
+/// **A call carrying value is rejected**, even though it delivers the ETH.
+///
+/// A node settles by sending directly, so calldata never appears on a real
+/// settlement. The constraint exists for the bounds: a call's payload is
+/// unbounded and its receipt may carry any number of logs, which on mainnet
+/// reaches 21KB against a bare send's 393 bytes. Without this the relation
+/// would accept settlements no machine can prove.
 #[test]
-fn accepts_a_call_carrying_value() {
+fn rejects_a_call_carrying_value() {
     let v = 1_000u128;
     let payload = enc_list(&[
         enc_int(1),
@@ -256,7 +261,36 @@ fn accepts_a_call_carrying_value() {
     ]);
     let mut tx = vec![0x02];
     tx.extend_from_slice(&payload);
-    assert!(accepts_genuine_intent(&tx, &amount(v)));
+    assert!(
+        !accepts_genuine_intent(&tx, &amount(v)),
+        "accepted a settlement carrying calldata"
+    );
+}
+
+/// A single calldata byte is still calldata.
+#[test]
+fn rejects_a_one_byte_call() {
+    let v = 1_000u128;
+    let payload = enc_list(&[
+        enc_int(1),
+        enc_int(9),
+        enc_int(1_500_000_000),
+        enc_int(20_000_000_000),
+        enc_int(21_000),
+        enc_str(&RECIPIENT),
+        enc_int(v),
+        enc_str(&[0x00]),
+        access_list(),
+        enc_int(0),
+        sig(),
+        sig(),
+    ]);
+    let mut tx = vec![0x02];
+    tx.extend_from_slice(&payload);
+    assert!(
+        !accepts_genuine_intent(&tx, &amount(v)),
+        "accepted a settlement carrying one calldata byte"
+    );
 }
 
 /// A non-empty access list, which the relation must contain but never walks.

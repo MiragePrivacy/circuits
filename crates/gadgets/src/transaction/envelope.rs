@@ -1,13 +1,13 @@
 //! Transaction envelope parsing and the `to`/`value` relation, spec 12.6.1.
 //!
-//! The three supported layouts and where they put the two fields the relation
+//! The three supported layouts and where they put the fields the relation
 //! reads:
 //!
 //! ```text
-//! type  items  to  value
-//! 0x00      9   3      4    legacy
-//! 0x01     11   4      5    EIP-2930
-//! 0x02     12   5      6    EIP-1559
+//! type  items  to  value  data
+//! 0x00      9   3      4     5   legacy
+//! 0x01     11   4      5     6   EIP-2930
+//! 0x02     12   5      6     7   EIP-1559
 //! ```
 //!
 //! Each is decoded speculatively under its own `active` flag, because
@@ -36,18 +36,21 @@ const SHAPES: [Shape; 3] = [
         items: 9,
         to: 3,
         value: 4,
+        data: 5,
     },
     Shape {
         prefix: Some(0x01),
         items: 11,
         to: 4,
         value: 5,
+        data: 6,
     },
     Shape {
         prefix: Some(0x02),
         items: 12,
         to: 5,
         value: 6,
+        data: 7,
     },
 ];
 
@@ -57,18 +60,20 @@ struct Shape {
     items: usize,
     to: usize,
     value: usize,
+    data: usize,
 }
 
-/// The two fields the native relation reads, selected across the envelope
-/// shapes.
+/// The fields the native relation reads, selected across the envelope shapes.
 pub struct Fields<F: PrimeField> {
     /// The `to` item. Its payload is the 20-byte recipient.
     pub to: Item<F>,
     /// The `value` item. Its payload is a canonical big-endian integer.
     pub value: Item<F>,
+    /// The `data` item, which a settlement must leave empty.
+    pub data: Item<F>,
 }
 
-/// Parses the envelope and returns the `to` and `value` items.
+/// Parses the envelope and returns the items the relation reads.
 ///
 /// Enforced here:
 /// - a supported envelope: an RLP list header, or a type prefix of `0x01` or
@@ -76,7 +81,7 @@ pub struct Fields<F: PrimeField> {
 /// - the exact item count that envelope's type fixes, tiling the list
 /// - the payload closing exactly at the transaction's real length
 ///
-/// The `to` and `value` assertions are [`enforce_transfer`]'s job, so that a
+/// The field assertions are [`enforce_transfer`]'s job, so that a
 /// caller can parse without committing to an intent.
 pub fn parse<F: PrimeField>(
     transaction: &[UInt8<F>],
@@ -128,6 +133,7 @@ pub fn parse<F: PrimeField>(
     // what makes selecting valid.
     let mut to: Option<Item<F>> = None;
     let mut value: Option<Item<F>> = None;
+    let mut data: Option<Item<F>> = None;
 
     for (shape, hit) in SHAPES.iter().zip(is_shape.iter()) {
         let shape_active = active.clone() & hit;
@@ -155,11 +161,16 @@ pub fn parse<F: PrimeField>(
             None => items[shape.value].clone(),
             Some(prev) => select_item(hit, &items[shape.value], &prev)?,
         });
+        data = Some(match data {
+            None => items[shape.data].clone(),
+            Some(prev) => select_item(hit, &items[shape.data], &prev)?,
+        });
     }
 
     Ok(Fields {
         to: to.expect("SHAPES is non-empty"),
         value: value.expect("SHAPES is non-empty"),
+        data: data.expect("SHAPES is non-empty"),
     })
 }
 
@@ -167,6 +178,7 @@ pub fn parse<F: PrimeField>(
 ///
 /// - `to` is exactly 20 bytes and equals the committed recipient
 /// - `value` equals the committed amount
+/// - `data` is empty: a bare send, not a call
 ///
 /// The `to` length check is what rejects a contract creation, whose `to` is the
 /// empty string. Without it a creation's zero-length `to` would read as zero
@@ -194,6 +206,26 @@ pub fn enforce_transfer<F: PrimeField>(
     {
         got.conditional_enforce_equal(want, active)?;
     }
+
+    // `data` is empty: the settlement is a bare send.
+    //
+    // A node settles by sending ETH directly, so calldata never appears on a
+    // real settlement. Enforcing that here rather than trusting the enclave to
+    // produce it is what makes the compiled bounds structural: a call carrying
+    // value has an unbounded payload and a receipt that may carry any number of
+    // logs, measured on mainnet at 7KB and 21KB against bare sends' 122 and 393
+    // bytes. Left unconstrained, the relation would accept settlements whose
+    // buffers no machine can allocate — 213M constraints at the observed p90,
+    // roughly 598 GB.
+    //
+    // The trade is the usual one: a settlement that attaches calldata becomes
+    // unprovable, and spec 12.9 puts that on the executor. That is the right
+    // side to fail on, because the alternative is a settlement that is
+    // *accepted* by the circuit and still cannot be proven.
+    fields
+        .data
+        .payload_len
+        .conditional_enforce_equal(&FpVar::zero(), active)?;
 
     // `value` is a canonical big-endian RLP integer, so at most 32 payload
     // bytes. Longer is not an amount this relation can compare.
