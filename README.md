@@ -10,9 +10,10 @@ evidence for each rejected alternative — read it before proposing a change.
 Status: **steps 2 and 3 complete.** The ERC-20 relation synthesizes at ~10.4M
 constraints, is satisfied by all 100 mainnet fixtures, and a real proof verifies
 through the exported Solidity verifier on-chain (4,858 bytes, ~222.7k gas). The
-native-ETH relation synthesizes at ~17.8M constraints against synthetic
-fixtures; it has no mainnet corpus yet, and its proving time leaks the asset
-kind. See "Native ETH" below before treating it as shippable.
+native-ETH relation synthesizes at ~17.8M constraints and is satisfied by all 57
+bare-send mainnet fixtures at the compiled bounds. Two things block it: its
+proving time leaks the asset kind, and settlements to contract recipients run to
+21KB receipts that no commodity machine can prove. See "Native ETH" below.
 
 ## Build order
 
@@ -129,14 +130,64 @@ native one's count, or merging both into one circuit whose asset kind selects
 which assertions bind. The latter costs every ERC-20 proof the transaction-trie
 walk it does not need, which is what the measurement above is for.
 
+### The distribution has been measured, and it splits in two
+
+100 native settlements collected across 34 mainnet blocks
+(`test/vectors/mainnet-native.json`), with **both** tries rebuilt and checked
+against the header at collection time. 83 distinct recipients, transaction types
+0 and 2, 57 bare sends and 43 value-carrying calls.
+
+The two shapes the relation accepts are not comparable:
+
+| | Transaction | Receipt | Max node |
+|---|---|---|---|
+| Bare send (57) | ≤ 122 | ≤ 393 | ≤ 532 |
+| Value-carrying call (43) | ≤ 7,225 | ≤ 21,501 | ≤ 21,508 |
+
+A bare send is what spec 20.3's direct-settlement policy produces. A
+value-carrying call is what a recipient contract with a `receive()` hook
+produces, and the relation accepts it because what the escrow owes is delivery
+of ETH — value attached to a call delivers it exactly as a bare send does.
+
+**All 57 bare sends satisfy `NativeCircuit` at the compiled bounds**, on real
+chain data, unmodified. That is the end-to-end validation of the native path.
+
+### The tail is not affordable
+
+Cost scales with every buffer bound, and the native relation pays two trie
+arrays, so the tail is not a dearer proof but a different order of magnitude.
+Measured by `cost_scales_with_the_observed_distribution`:
+
+| Bound | Constraints | Memory at 2.8 GB/M |
+|---|---|---|
+| 320 (p50) | 12,631,645 | ~35 GB |
+| 448 (bare-send max) | 13,383,133 | ~37 GB |
+| 1,088 (p75) | 30,817,207 | ~86 GB |
+| 4,224 (p90) | 213,399,317 | **~598 GB** |
+
+Synthesizing the largest fixture — a 21,501-byte receipt — was OOM-killed on a
+94 GB machine. Not slow: impossible. So a bound wide enough to cover the
+observed maximum is not a bound anyone can prove against, and
+`the_largest_call_exceeds_available_memory` is marked `#[ignore]` to record that
+rather than to skip an inconvenience.
+
+The consequence is a policy decision, not a tuning one. Either native
+settlements are restricted to bare sends — which spec 20.3 already implies, and
+which the compiled bounds already cover with headroom — or the escrow accepts
+that a settlement to a contract recipient can be unprovable, and spec 12.9 puts
+that loss on the executor who has already paid. **The circuit cannot make this
+choice; the enclave's pre-settlement check must.**
+
+Note this is a sharper version of a hazard the ERC-20 path already has.
+`MAX_RECEIPT_BYTES` relies on the same pre-settlement review, but an ERC-20
+receipt's size varies far less than a contract call's.
+
 ### What is not done
 
-- **No mainnet fixtures.** All 100 collected fixtures are ERC-20; the collector
-  filters for direct `transfer()` calls and never fetches transaction bodies.
-  The native bounds are therefore reasoned rather than measured, which is
-  exactly the position `MAX_HEADER_BYTES` was in when a 640-byte bound set from
-  one synthetic header was exceeded within five real blocks.
 - **No exported verifier.** `contracts/` holds the ERC-20 verifier only.
+- **Bounds not re-frozen.** `NativeBounds::default()` still carries the reasoned
+  values. They cover every bare send with headroom, but the decision above has
+  to be made before they are frozen under spec 18.4.
 - **`asset_kind` is pinned in the native relation but not the ERC-20 one.**
   `NativeCircuit` enforces `assetKind == 0`, without which an escrow holding a
   token row could be collected by sending the same amount of ETH to the same
@@ -232,7 +283,7 @@ circuits/
     gadgets/    in-circuit primitives: keccak, bytes, RLP, MPT, transaction
     relation/   the ERC-20 receipt relation and the native dual-trie relation
     prover/     setup, prove, verify, Solidity verifier export
-    fixtures/   mainnet collection: receipt-trie rebuild and proof extraction
+    fixtures/   mainnet collection: receipt- and transaction-trie rebuild
   contracts/    the exported verifier, a real proof, and its calldata
   test/         VerifierTest.sol plus the deterministic vectors
   test/vectors/ deterministic fixtures shared with nomad and Solidity
@@ -349,6 +400,7 @@ Release-mode runtimes, which are wildly uneven — budget for the long ones:
 | `relation` (unit, both relations) | ~13s |
 | `gadgets` | ~10min |
 | `relation --test mainnet` | ~8min (100 fixtures, one full system each) |
+| `relation --test mainnet_native` | ~13min (57 bare sends + 8 sampled calls) |
 
 Two traps worth knowing before you wait on a run:
 

@@ -16,10 +16,22 @@ Fix the encoder, never the vector.
 
 | File | Covers | Spec |
 |---|---|---|
-| `intent_commitment.json` | Section 8.3 preimage and digest | 8.3, 19.1 |
-| `statement_hash.json` | Section 10.2 preimage, digest, and the two 128-bit limbs | 10.2, 19.1 |
-| `limb_split.json` | hi/lo split of 256-bit values, including boundary and alias cases | 8.1 |
-| `receipt_relation.json` | full ERC-20 witness: receipt RLP, MPT path, expected outcome | 12.5, 12.6 |
+| `commitment.json` | Section 8.3 preimage and digest, both asset kinds | 8.3, 19.1 |
+| `statement.json` | Section 10.2 preimage, digest, and the two 128-bit limbs | 10.2, 19.1 |
+| `mainnet.json` | 100 real ERC-20 settlements: receipt RLP, MPT path, commitment | 12.5, 12.6 |
+| `mainnet-native.json` | 100 real native ETH settlements: transaction and receipt RLP, both MPT paths, commitment | 12.5, 12.6 |
+
+The two `mainnet*.json` files are collected rather than generated, by
+`cargo run -p mirage-fixtures --release --bin collect` and `--bin
+collect-native`. Every fixture had its trie reconstruction checked against the
+block header at collection time, so a fixture that does not correspond to real
+chain state was dropped rather than written.
+
+`mainnet-native.json` carries both shapes the native relation accepts, tagged by
+`bare_send`: 57 direct sends and 43 calls carrying value. The two differ by an
+order of magnitude in size and the difference decides the compiled bounds, so a
+collection that dropped either would be misleading. See the top-level README's
+"Native ETH" section.
 
 ## Format
 

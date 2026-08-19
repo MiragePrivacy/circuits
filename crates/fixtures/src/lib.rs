@@ -50,6 +50,126 @@ pub struct Fixture {
     pub header_bytes: usize,
 }
 
+/// One end-to-end native-ETH fixture: a real mainnet value transfer, both
+/// inclusion proofs, and a commitment derived from it.
+///
+/// The dual-trie shape is the difference from [`Fixture`]. The transaction and
+/// its receipt sit at the same index in their respective tries, so one key
+/// serves both proofs, but the node arrays and roots are independent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NativeFixture {
+    pub tx_hash: String,
+    pub block_number: u64,
+    pub tx_index: usize,
+    /// EIP-2718 envelope type, 0 for legacy.
+    pub transaction_type: u8,
+    /// True when the transaction carries no calldata.
+    ///
+    /// Both shapes are provable. Recorded because they differ by an order of
+    /// magnitude in size, so the bounds analysis must see them separately.
+    pub bare_send: bool,
+
+    /// RLP block header, carrying both roots.
+    pub header: String,
+    pub transactions_root: String,
+    pub receipts_root: String,
+    /// `rlp(transactionIndex)`, the key for both tries.
+    pub key: String,
+
+    /// The transaction as it appears in the trie, envelope included.
+    pub transaction: String,
+    /// Inclusion path under `transactionsRoot`, root first.
+    pub transaction_nodes: Vec<String>,
+
+    /// The receipt as it appears in the trie, envelope included.
+    pub receipt: String,
+    /// Inclusion path under `receiptsRoot`, root first.
+    pub receipt_nodes: Vec<String>,
+
+    /// The spec 8.3 opening and its commitment, asset kind native.
+    pub intent: commitment::Intent,
+
+    /// Shape, for the bounds analysis.
+    pub transaction_depth: usize,
+    pub receipt_depth: usize,
+    pub max_transaction_node_bytes: usize,
+    pub max_receipt_node_bytes: usize,
+    pub transaction_bytes: usize,
+    pub receipt_bytes: usize,
+    pub header_bytes: usize,
+}
+
+/// The collected native dataset.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct NativeDataset {
+    pub source: String,
+    pub scope: String,
+    pub note: String,
+    pub count: usize,
+    pub fixtures: Vec<NativeFixture>,
+}
+
+/// Summary of the native shape distribution.
+pub struct NativeShape {
+    pub transaction_depth: (usize, usize),
+    pub receipt_depth: (usize, usize),
+    pub transaction_node_bytes: (usize, usize),
+    pub receipt_node_bytes: (usize, usize),
+    pub transaction_bytes: (usize, usize),
+    pub receipt_bytes: (usize, usize),
+    pub header_bytes: (usize, usize),
+    pub types: Vec<u8>,
+}
+
+impl NativeDataset {
+    pub fn shape(&self) -> Option<NativeShape> {
+        Self::shape_of(&self.fixtures.iter().collect::<Vec<_>>())
+    }
+
+    /// The distribution over a subset, so bare sends and value-carrying calls
+    /// can be reported separately. They differ by an order of magnitude, and a
+    /// combined maximum hides which population drives each bound.
+    pub fn shape_of(fixtures: &[&NativeFixture]) -> Option<NativeShape> {
+        if fixtures.is_empty() {
+            return None;
+        }
+        let range = |f: &dyn Fn(&NativeFixture) -> usize| {
+            let vals: Vec<usize> = fixtures.iter().map(|x| f(x)).collect();
+            (*vals.iter().min().unwrap(), *vals.iter().max().unwrap())
+        };
+        let mut types: Vec<u8> = fixtures.iter().map(|f| f.transaction_type).collect();
+        types.sort_unstable();
+        types.dedup();
+
+        Some(NativeShape {
+            transaction_depth: range(&|f| f.transaction_depth),
+            receipt_depth: range(&|f| f.receipt_depth),
+            transaction_node_bytes: range(&|f| f.max_transaction_node_bytes),
+            receipt_node_bytes: range(&|f| f.max_receipt_node_bytes),
+            transaction_bytes: range(&|f| f.transaction_bytes),
+            receipt_bytes: range(&|f| f.receipt_bytes),
+            header_bytes: range(&|f| f.header_bytes),
+            types,
+        })
+    }
+
+    /// The 95th percentile of a field, which is what a bound should be set
+    /// from rather than the maximum.
+    ///
+    /// Spec 12.9 puts an unprovable settlement's cost on the executor, so a
+    /// bound wants the tail plus headroom. Reporting only the max hides how
+    /// far out that max sits: one 5KB outlier among 99 sub-300-byte receipts
+    /// is a different decision from a distribution that is genuinely wide.
+    pub fn percentile(&self, f: impl Fn(&NativeFixture) -> usize, p: f64) -> usize {
+        let mut vals: Vec<usize> = self.fixtures.iter().map(&f).collect();
+        if vals.is_empty() {
+            return 0;
+        }
+        vals.sort_unstable();
+        vals[(((vals.len() - 1) as f64) * p).round() as usize]
+    }
+}
+
 /// The collected dataset.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Dataset {

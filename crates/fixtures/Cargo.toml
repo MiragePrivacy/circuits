@@ -9,6 +9,11 @@ name = "collect"
 path = "src/bin/collect.rs"
 required-features = ["collect"]
 
+[[bin]]
+name = "collect-native"
+path = "src/bin/collect_native.rs"
+required-features = ["collect"]
+
 [dependencies]
 mirage-encoding = { path = "../encoding" }
 serde.workspace = true
