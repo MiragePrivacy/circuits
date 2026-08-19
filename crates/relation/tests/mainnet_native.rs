@@ -8,19 +8,22 @@
 //! Skipped with a clear message when the dataset is absent, so the suite still
 //! runs in a checkout that has not collected it.
 //!
-//! # Two populations
+//! # Two populations, one of which must be rejected
 //!
-//! The dataset deliberately contains both shapes the relation accepts:
+//! The dataset carries both shapes a native value transfer takes on mainnet:
 //!
-//! - **Bare sends**, which spec 20.3's direct-settlement policy produces. These
-//!   fit the compiled bounds comfortably.
-//! - **Value-carrying calls**, which a recipient contract with a `receive()`
-//!   hook produces. Their receipts run to 21KB.
+//! - **Bare sends** (100), which is what a node produces. These are the
+//!   settlements the relation must accept, and they fit the compiled bounds
+//!   with headroom.
+//! - **Value-carrying calls** (43), which a recipient contract with a
+//!   `receive()` hook produces. The relation must **reject** these: a node only
+//!   ever settles by direct transfer, and a call's 21KB receipt would need a
+//!   bound no machine can prove against.
 //!
-//! The relation accepts both, because what the escrow owes is delivery of ETH
-//! and a call delivers it exactly as a bare send does. So both are tested, at
-//! bounds wide enough for the observed data — which is not the same as the
-//! bounds a production build would compile. See `bounds_note`.
+//! Keeping the calls rather than filtering them out is deliberate. They are the
+//! evidence that the `data` constraint binds on real chain data, and the
+//! measured reason the constraint exists at all — see
+//! `cost_scales_with_the_observed_distribution`.
 
 use std::path::PathBuf;
 
@@ -146,10 +149,10 @@ fn witness(f: &Fixture) -> NativeWitness {
 
 /// Bounds wide enough for the fixtures under test.
 ///
-/// Derived from the data rather than fixed, because the value-carrying calls in
-/// this dataset exceed every compiled bound. Testing at the compiled bounds
-/// would mean dropping them, which is precisely the population the collection
-/// exercise was meant to surface.
+/// Used only for the value-carrying calls, which exceed every compiled bound.
+/// They must be rejected on the `data` constraint rather than on a buffer
+/// overflow, so they are given buffers that hold them: a fixture rejected only
+/// because it did not fit would prove nothing about the constraint.
 fn bounds_for(fixtures: &[&Fixture]) -> NativeBounds {
     let max = |f: &dyn Fn(&Fixture) -> usize| fixtures.iter().map(|x| f(x)).max().unwrap_or(0);
     // Round to a 64-byte step rather than a power of two. Cost scales linearly
@@ -170,49 +173,6 @@ fn bounds_for(fixtures: &[&Fixture]) -> NativeBounds {
         transaction_node_bytes: round_up(max(&|f| f.max_transaction_node_bytes).max(1)),
         transaction_depth: max(&|f| f.transaction_depth).max(1),
     }
-}
-
-fn check(label: &str, fixtures: &[&Fixture]) {
-    if fixtures.is_empty() {
-        panic!("{label}: no fixtures of this shape in the dataset");
-    }
-    let b = bounds_for(fixtures);
-    eprintln!(
-        "{label}: {} fixtures at bounds tx {} / receipt {} / node {}/{} / depth {}",
-        fixtures.len(),
-        b.transaction_bytes,
-        b.common.receipt_bytes,
-        b.transaction_node_bytes,
-        b.common.node_bytes,
-        b.common.depth
-    );
-
-    let mut failed = Vec::new();
-    for f in fixtures {
-        let cs = ConstraintSystem::<Fr>::new_ref();
-        NativeCircuit::prove(b, witness(f))
-            .generate_constraints(cs.clone())
-            .expect("synthesis");
-        if !cs.is_satisfied().unwrap_or(false) {
-            failed.push(format!(
-                "{} (block {}, tx {}, type {}, bare {}): {:?}",
-                f.tx_hash,
-                f.block_number,
-                f.tx_index,
-                f.transaction_type,
-                f.bare_send,
-                cs.which_is_unsatisfied().ok().flatten()
-            ));
-        }
-    }
-
-    assert!(
-        failed.is_empty(),
-        "{label}: {} of {} fixtures unsatisfied:\n  {}",
-        failed.len(),
-        fixtures.len(),
-        failed.join("\n  ")
-    );
 }
 
 /// The bare sends must satisfy the relation at the **compiled** bounds.
@@ -293,28 +253,60 @@ fn bare_sends_satisfy_the_compiled_bounds() {
     );
 }
 
-/// The value-carrying calls must satisfy the relation too, at bounds wide
-/// enough to hold them.
+/// **Every value-carrying call must be rejected**, on real chain data.
 ///
-/// Slower than the bare-send test by the ratio of the bounds, so it runs over a
-/// sample rather than all of them: at a 32KB receipt bound one system is
-/// enormous, and the point is that the relation is correct on the shape, not
-/// that every individual call is.
+/// A node settles by sending ETH directly, so calldata never appears on a real
+/// settlement and the relation enforces `data` empty. These 43 fixtures are the
+/// evidence that the constraint binds against transactions the chain actually
+/// produced, rather than only against the synthetic case in
+/// `gadgets::transaction::tests::rejects_a_call_carrying_value`.
+///
+/// They are run at bounds wide enough to hold them, because the point is that
+/// the *relation* rejects them, not that the buffers cannot fit them. A fixture
+/// rejected only because it overflowed its buffer would prove nothing about the
+/// constraint. The largest few are skipped for memory rather than relevance —
+/// see `cost_scales_with_the_observed_distribution`.
 #[test]
-fn value_carrying_calls_satisfy_the_relation() {
+fn value_carrying_calls_are_rejected() {
     let Some(d) = load() else {
         return;
     };
 
-    // The smallest few, so the bounds stay tractable. The largest are covered
-    // by `the_largest_call_satisfies_the_relation`.
     let mut calls: Vec<&Fixture> = d.fixtures.iter().filter(|f| !f.bare_send).collect();
     assert!(!calls.is_empty(), "no value-carrying calls in the dataset");
     calls.sort_by_key(|f| f.receipt_bytes.max(f.transaction_bytes));
     calls.truncate(8);
 
-    check("value-carrying calls", &calls);
-    eprintln!("all {} sampled calls satisfied", calls.len());
+    let b = bounds_for(&calls);
+    eprintln!(
+        "value-carrying calls: {} fixtures at bounds tx {} / receipt {}",
+        calls.len(),
+        b.transaction_bytes,
+        b.common.receipt_bytes
+    );
+
+    let mut accepted = Vec::new();
+    for f in &calls {
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        NativeCircuit::prove(b, witness(f))
+            .generate_constraints(cs.clone())
+            .expect("synthesis");
+        if cs.is_satisfied().unwrap_or(false) {
+            accepted.push(format!(
+                "{} (block {}, tx {}, {} bytes of receipt)",
+                f.tx_hash, f.block_number, f.tx_index, f.receipt_bytes
+            ));
+        }
+    }
+
+    assert!(
+        accepted.is_empty(),
+        "{} of {} value-carrying calls were accepted:\n  {}",
+        accepted.len(),
+        calls.len(),
+        accepted.join("\n  ")
+    );
+    eprintln!("all {} sampled calls rejected", calls.len());
 }
 
 /// How the relation's size scales with the buffer bounds, measured rather than
@@ -412,17 +404,20 @@ fn cost_scales_with_the_observed_distribution() {
     );
 }
 
-/// The widest fixture in the dataset.
+/// The widest fixture in the dataset, at bounds wide enough to hold it.
 ///
-/// **This does not fit in 94 GB.** Synthesizing one system at a ~21.5KB buffer
-/// bound was OOM-killed on the machine that collected the dataset, which is the
-/// finding rather than an obstacle to it: at these bounds the relation is not
-/// provable on commodity hardware, so a value-carrying settlement of this size
-/// cannot be settled through the native path as currently bounded.
+/// **This does not fit in 94 GB**: synthesizing one system at a ~21.5KB buffer
+/// bound was OOM-killed on the machine that collected the dataset. That is why
+/// the relation constrains `data` to be empty rather than accepting calls and
+/// leaving the size to policy — a bound covering this fixture is not one anyone
+/// can prove against.
 ///
 /// Kept as an ignored test so the claim is reproducible rather than hearsay.
+/// Under the current relation this fixture is rejected on the `data` constraint
+/// long before its size matters, so the test exists to document the ceiling
+/// that made the constraint necessary.
 #[test]
-#[ignore = "OOM-killed at 94 GB; documents the ceiling rather than passing"]
+#[ignore = "OOM-killed at 94 GB; documents why data is constrained"]
 fn the_largest_call_exceeds_available_memory() {
     let Some(d) = load() else {
         return;
@@ -432,10 +427,16 @@ fn the_largest_call_exceeds_available_memory() {
         .iter()
         .max_by_key(|f| f.receipt_bytes.max(f.transaction_bytes))
         .expect("non-empty");
-    check("largest call", &[largest]);
+    let b = bounds_for(&[largest]);
+    let cs = ConstraintSystem::<Fr>::new_ref();
+    NativeCircuit::prove(b, witness(largest))
+        .generate_constraints(cs.clone())
+        .expect("synthesis");
     eprintln!(
-        "largest fixture satisfied: {} ({} byte receipt)",
-        largest.tx_hash, largest.receipt_bytes
+        "largest fixture ({} byte receipt): {} constraints, satisfied {}",
+        largest.receipt_bytes,
+        cs.num_constraints(),
+        cs.is_satisfied().unwrap_or(false)
     );
 }
 

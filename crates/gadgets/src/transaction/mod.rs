@@ -25,11 +25,19 @@
 //! never verified — consensus already checked them, since an unsigned
 //! transaction cannot be in the trie in the first place.
 //!
-//! Nor does it prove the transaction is a *bare* transfer. `data` is left
-//! unconstrained, so a contract call that happens to carry the right `to` and
-//! `value` satisfies the relation. That is intentional: what the escrow owes is
-//! delivery of ETH to the recipient, and value attached to a call delivers it
-//! exactly as a bare send does.
+//! # Bare sends only
+//!
+//! `data` must be empty. A node settles by sending ETH directly, so calldata
+//! never appears on a real settlement, and the relation enforces that rather
+//! than trusting the enclave to produce it.
+//!
+//! This is a bounds decision as much as a semantic one. A call carrying value
+//! delivers ETH exactly as a bare send does, so an earlier draft left `data`
+//! unconstrained — but a call's payload is unbounded and its receipt may carry
+//! any number of logs. Measured on mainnet: 7KB transactions and 21KB receipts
+//! against a bare send's 122 and 393 bytes, which at the observed p90 is 213M
+//! constraints, roughly 598 GB. Leaving it open would mean a relation that
+//! *accepts* settlements no machine can prove.
 //!
 //! # Envelope shapes
 //!

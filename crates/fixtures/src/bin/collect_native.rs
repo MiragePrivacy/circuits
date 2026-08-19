@@ -49,6 +49,16 @@ fn main() {
     let stride: u64 = arg(&args, "--stride")
         .and_then(|v| v.parse().ok())
         .unwrap_or(13);
+    // How many of `count` must be bare sends. The relation only accepts those,
+    // so they are the population the bounds are set from; the calls are kept as
+    // rejection fixtures and are cheap to find, so a quota stops them crowding
+    // out the ones that matter.
+    let want_bare: usize = arg(&args, "--bare")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(count);
+    // Merge into an existing dataset rather than replacing it, so a top-up run
+    // keeps what a previous one collected.
+    let merge = args.iter().any(|a| a == "--merge");
 
     let latest = match rpc(&rpc_url, "eth_blockNumber", vec![]) {
         Ok(v) => u64::from_str_radix(v.as_str().unwrap_or("0x0").trim_start_matches("0x"), 16)
@@ -63,21 +73,51 @@ fn main() {
     eprintln!("latest block {latest}");
 
     let mut fixtures: Vec<NativeFixture> = Vec::new();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    if merge {
+        if let Some(prior) = std::fs::read_to_string(&out)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<NativeDataset>(&raw).ok())
+        {
+            eprintln!("merging into {} existing fixtures", prior.count);
+            seen.extend(prior.fixtures.iter().map(|f| f.tx_hash.clone()));
+            fixtures = prior.fixtures;
+        }
+    }
+
     // Stay back from the tip: recent blocks can still reorg.
     let mut block = latest.saturating_sub(128);
     let mut scanned = 0u32;
 
-    while fixtures.len() < count && scanned < 600 && block > 1_000_000 {
+    let bare_count = |v: &[NativeFixture]| v.iter().filter(|f| f.bare_send).count();
+    while (fixtures.len() < count || bare_count(&fixtures) < want_bare)
+        && scanned < 3000
+        && block > 1_000_000
+    {
         scanned += 1;
-        let want = (count - fixtures.len()).min(3);
-        match collect_block(&rpc_url, block, want) {
+        // Once the bare quota is the only thing outstanding, stop taking calls.
+        let bare_only = bare_count(&fixtures) < want_bare && fixtures.len() >= count;
+        let want = if bare_only {
+            (want_bare - bare_count(&fixtures)).min(3)
+        } else {
+            (count - fixtures.len()).min(3)
+        };
+
+        match collect_block(&rpc_url, block, want, bare_only) {
             Ok(got) if !got.is_empty() => {
-                eprintln!(
-                    "  block {block}: +{} (total {})",
-                    got.len(),
-                    fixtures.len() + got.len()
-                );
-                fixtures.extend(got);
+                let fresh: Vec<NativeFixture> = got
+                    .into_iter()
+                    .filter(|f| seen.insert(f.tx_hash.clone()))
+                    .collect();
+                if !fresh.is_empty() {
+                    eprintln!(
+                        "  block {block}: +{} (total {}, {} bare)",
+                        fresh.len(),
+                        fixtures.len() + fresh.len(),
+                        bare_count(&fixtures) + fresh.iter().filter(|f| f.bare_send).count()
+                    );
+                    fixtures.extend(fresh);
+                }
             }
             Ok(_) => {}
             Err(e) => eprintln!("  block {block}: {e}"),
@@ -225,7 +265,12 @@ fn rpc(url: &str, method: &str, params: Vec<Value>) -> Result<Value, String> {
     Err(format!("{method} failed: {last}"))
 }
 
-fn collect_block(url: &str, number: u64, want: usize) -> Result<Vec<NativeFixture>, String> {
+fn collect_block(
+    url: &str,
+    number: u64,
+    want: usize,
+    bare_only: bool,
+) -> Result<Vec<NativeFixture>, String> {
     let tag = Value::String(format!("0x{number:x}"));
     // `true` for full transaction objects: the transaction trie needs bodies,
     // not hashes.
@@ -293,6 +338,7 @@ fn collect_block(url: &str, number: u64, want: usize) -> Result<Vec<NativeFixtur
     // yields a set narrower than mainnet actually is.
     let candidates: Vec<usize> = (0..transactions.len())
         .filter(|&i| is_native_transfer(&transactions[i], &receipts[i]))
+        .filter(|&i| !bare_only || is_bare_send(&transactions[i]))
         .collect();
     if candidates.is_empty() {
         return Ok(vec![]);

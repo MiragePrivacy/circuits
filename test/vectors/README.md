@@ -27,11 +27,13 @@ collect-native`. Every fixture had its trie reconstruction checked against the
 block header at collection time, so a fixture that does not correspond to real
 chain state was dropped rather than written.
 
-`mainnet-native.json` carries both shapes the native relation accepts, tagged by
-`bare_send`: 57 direct sends and 43 calls carrying value. The two differ by an
-order of magnitude in size and the difference decides the compiled bounds, so a
-collection that dropped either would be misleading. See the top-level README's
-"Native ETH" section.
+`mainnet-native.json` carries both shapes a native value transfer takes, tagged
+by `bare_send`: 100 direct sends the relation must **accept**, and 43 calls
+carrying value it must **reject**. The calls are kept rather than filtered out
+because they are the evidence that the relation's empty-`data` constraint binds
+on real chain data, and the measured reason it exists — they run to 21KB
+receipts against a bare send's 393 bytes. See the top-level README's "Native
+ETH" section.
 
 ## Format
 
