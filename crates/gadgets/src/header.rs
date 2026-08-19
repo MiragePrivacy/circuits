@@ -10,9 +10,11 @@
 //!  parentBeaconBlockRoot, requestsHash]
 //! ```
 //!
-//! Step 2 needs two fields: `receiptsRoot` at index 5, which the MPT traversal
-//! authenticates against, and `number` at index 8, which the timing assertions
-//! use. Step 5's ancestry chain will additionally need `parentHash` at index 0.
+//! The ERC-20 relation needs two fields: `receiptsRoot` at index 5, which the
+//! MPT traversal authenticates against, and `number` at index 8, which the
+//! timing assertions use. The native relation additionally reads
+//! `transactionsRoot` at index 4 for its second trie. Step 5's ancestry chain
+//! will need `parentHash` at index 0.
 //!
 //! # Why the field count is enforced
 //!
@@ -53,6 +55,8 @@ pub struct Header<F: PrimeField> {
     pub parent_hash: Vec<UInt8<F>>,
     /// 32 bytes.
     pub receipts_root: Vec<UInt8<F>>,
+    /// 32 bytes. The native relation's second trie hangs from this.
+    pub transactions_root: Vec<UInt8<F>>,
     /// The block number, as a field element.
     pub number: FpVar<F>,
 }
@@ -88,6 +92,7 @@ pub fn parse<F: PrimeField>(
 
     let parent_hash = select_bytes(header, &items[IDX_PARENT_HASH].offset, 32)?;
     let receipts_root = select_bytes(header, &items[IDX_RECEIPTS_ROOT].offset, 32)?;
+    let transactions_root = select_bytes(header, &items[IDX_TRANSACTIONS_ROOT].offset, 32)?;
 
     // The block number is a canonical RLP integer below 2^64, so at most 8
     // payload bytes. The decoder rejects non-canonical encodings, so a short
@@ -100,6 +105,7 @@ pub fn parse<F: PrimeField>(
     Ok(Header {
         parent_hash,
         receipts_root,
+        transactions_root,
         number,
     })
 }

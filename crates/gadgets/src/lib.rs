@@ -33,6 +33,7 @@ pub mod keccak;
 pub mod mpt;
 pub mod receipt;
 pub mod rlp;
+pub mod transaction;
 pub mod statement;
 
 /// Compiled bounds from spec section 12.9.
@@ -52,6 +53,12 @@ pub mod bounds {
     pub const MAX_MPT_NODE_BYTES: usize = 2048;
     pub const MAX_MPT_DEPTH: usize = 16;
     pub const MAX_LOGS: usize = 8;
+
+    /// The native relation's transaction buffer. A bare value transfer is
+    /// ~110 bytes for EIP-1559 and less for legacy; the headroom covers a
+    /// non-empty access list, which the relation does not walk but must still
+    /// contain.
+    pub const MAX_TRANSACTION_BYTES: usize = 512;
 
     /// Unused in step 2, which reveals the transaction block. Step 5 adds the
     /// ancestry chain that consumes these.

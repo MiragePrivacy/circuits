@@ -16,6 +16,13 @@
 //! (12.5), the ERC-20 relation (12.6), and the statement hash (10.2).
 //!
 //! Not wired: the delayed-witness ancestry chain (12.7), which is step 5.
+//!
+//! The native-ETH counterpart is [`native::NativeCircuit`], a separate circuit
+//! with its own verification key. Read its module docs before treating the two
+//! as interchangeable: their constraint counts differ, so proving time
+//! distinguishes the asset kind, which spec 12.9 forbids.
+
+pub mod native;
 
 use ark_ff::PrimeField;
 use ark_r1cs_std::alloc::AllocVar;
@@ -316,7 +323,7 @@ impl<F: PrimeField> ConstraintSynthesizer<F> for ReceiptCircuit {
     }
 }
 
-fn enforce_bytes_equal<F: PrimeField>(
+pub(crate) fn enforce_bytes_equal<F: PrimeField>(
     left: &[UInt8<F>],
     right: &[UInt8<F>],
 ) -> Result<(), SynthesisError> {
@@ -331,7 +338,7 @@ fn enforce_bytes_equal<F: PrimeField>(
     Ok(())
 }
 
-fn fixed_be_value<F: PrimeField>(bytes: &[UInt8<F>]) -> Result<FpVar<F>, SynthesisError> {
+pub(crate) fn fixed_be_value<F: PrimeField>(bytes: &[UInt8<F>]) -> Result<FpVar<F>, SynthesisError> {
     let mut value = FpVar::zero();
     for byte in bytes {
         value =
@@ -343,7 +350,7 @@ fn fixed_be_value<F: PrimeField>(bytes: &[UInt8<F>]) -> Result<FpVar<F>, Synthes
 /// Compares field elements that are required here to be unsigned 64-bit
 /// integers. Range-constraining both operands prevents field wraparound from
 /// changing the ordering relation.
-fn lt_u64<F: PrimeField>(a: &FpVar<F>, b: &FpVar<F>) -> Result<Boolean<F>, SynthesisError> {
+pub(crate) fn lt_u64<F: PrimeField>(a: &FpVar<F>, b: &FpVar<F>) -> Result<Boolean<F>, SynthesisError> {
     let a_bits = a.to_bits_le()?;
     let b_bits = b.to_bits_le()?;
     for bit in a_bits.iter().skip(64).chain(b_bits.iter().skip(64)) {
@@ -360,7 +367,7 @@ fn lt_u64<F: PrimeField>(a: &FpVar<F>, b: &FpVar<F>) -> Result<Boolean<F>, Synth
 }
 
 /// The commitment opening as circuit bytes, in spec 8.3 widths.
-fn alloc_opening<F: PrimeField>(
+pub(crate) fn alloc_opening<F: PrimeField>(
     cs: ConstraintSystemRef<F>,
     i: &IntentOpening,
 ) -> Result<mirage_gadgets::commitment::Opening<F>, SynthesisError> {
@@ -380,7 +387,7 @@ fn alloc_opening<F: PrimeField>(
 }
 
 /// The statement context as circuit bytes, in spec 10.2 widths.
-fn alloc_statement<F: PrimeField>(
+pub(crate) fn alloc_statement<F: PrimeField>(
     cs: ConstraintSystemRef<F>,
     c: &StatementContext,
 ) -> Result<statement::Context<F>, SynthesisError> {
@@ -416,7 +423,7 @@ pub fn public_signals(w: &Witness) -> (u128, u128) {
 /// Computing them natively rather than in-circuit is deliberate: the circuit's
 /// job is to prove it can reproduce them, and taking both sides from the same
 /// implementation would prove nothing.
-fn native_signals(c: &StatementContext) -> (u128, u128) {
+pub(crate) fn native_signals(c: &StatementContext) -> (u128, u128) {
     mirage_encoding::statement::Statement {
         instance_domain: c.instance_domain,
         chain_id: c.chain_id,
@@ -456,7 +463,7 @@ pub mod fixture {
         0x91, 0xb9, 0xb8, 0xec, 0x9b,
     ];
 
-    fn enc_str(p: &[u8]) -> Vec<u8> {
+    pub fn enc_str(p: &[u8]) -> Vec<u8> {
         if p.len() == 1 && p[0] < 0x80 {
             return p.to_vec();
         }
@@ -472,7 +479,7 @@ pub mod fixture {
         out
     }
 
-    fn enc_list(c: &[Vec<u8>]) -> Vec<u8> {
+    pub fn enc_list(c: &[Vec<u8>]) -> Vec<u8> {
         let body: Vec<u8> = c.concat();
         let mut out = Vec::new();
         if body.len() < 56 {
@@ -486,16 +493,16 @@ pub mod fixture {
         out
     }
 
-    fn trim(b: &[u8]) -> Vec<u8> {
+    pub fn trim(b: &[u8]) -> Vec<u8> {
         let first = b.iter().position(|&x| x != 0).unwrap_or(b.len() - 1);
         b[first..].to_vec()
     }
 
-    fn keccak(b: &[u8]) -> [u8; 32] {
+    pub fn keccak(b: &[u8]) -> [u8; 32] {
         mirage_encoding::keccak256(b)
     }
 
-    fn hex_prefix(nibbles: &[u8], is_leaf: bool) -> Vec<u8> {
+    pub fn hex_prefix(nibbles: &[u8], is_leaf: bool) -> Vec<u8> {
         let odd = nibbles.len() % 2 == 1;
         let flag = (if is_leaf { 2u8 } else { 0 }) | (if odd { 1 } else { 0 });
         let mut out = Vec::new();
@@ -513,7 +520,7 @@ pub mod fixture {
         out
     }
 
-    fn to_nibbles(b: &[u8]) -> Vec<u8> {
+    pub fn to_nibbles(b: &[u8]) -> Vec<u8> {
         b.iter().flat_map(|x| [x >> 4, x & 0x0f]).collect()
     }
 
@@ -644,15 +651,27 @@ pub mod fixture {
 
     /// A 21-field post-Prague header carrying the given receipts root.
     fn header_with_receipts_root(receipts_root: &[u8; 32], number: u64) -> Vec<u8> {
+        header_with_roots(&[0x05; 32], receipts_root, number)
+    }
+
+    /// A 21-field post-Prague header carrying both trie roots.
+    ///
+    /// The native relation reads `transactionsRoot` as well, so it cannot use
+    /// the placeholder the ERC-20 fixture leaves there.
+    pub fn header_with_roots(
+        transactions_root: &[u8; 32],
+        receipts_root: &[u8; 32],
+        number: u64,
+    ) -> Vec<u8> {
         enc_list(&[
-            enc_str(&[0x01; 32]),                  // parentHash
-            enc_str(&[0x02; 32]),                  // ommersHash
-            enc_str(&[0x03; 20]),                  // beneficiary
-            enc_str(&[0x04; 32]),                  // stateRoot
-            enc_str(&[0x05; 32]),                  // transactionsRoot
-            enc_str(receipts_root),                // receiptsRoot
-            enc_str(&[0u8; 256]),                  // logsBloom
-            enc_str(&[]),                          // difficulty
+            enc_str(&[0x01; 32]),          // parentHash
+            enc_str(&[0x02; 32]),          // ommersHash
+            enc_str(&[0x03; 20]),          // beneficiary
+            enc_str(&[0x04; 32]),          // stateRoot
+            enc_str(transactions_root),    // transactionsRoot
+            enc_str(receipts_root),        // receiptsRoot
+            enc_str(&[0u8; 256]),          // logsBloom
+            enc_str(&[]),                  // difficulty
             enc_str(&trim(&number.to_be_bytes())), // number
             enc_str(&[0x01, 0xc9, 0xc3, 0x80]),    // gasLimit
             enc_str(&[0x52, 0x08]),                // gasUsed

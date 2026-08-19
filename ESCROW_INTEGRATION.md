@@ -294,10 +294,13 @@ Two smaller gaps:
   groups payouts by asset. `EscrowERC20` is single-row, so `rowIndex` is
   constant 0 above. `EscrowBatch` is the multi-row case and needs the grouping
   logic; it is a separate piece of work.
-- **Native ETH.** `EscrowNative` needs the native relation, which is a second
-  MPT array over the transaction trie. Spec 12.9 requires it cost the same as
-  the ERC-20 path, since differing proving time by asset kind would split the
-  anonymity set.
+- **Native ETH.** The native relation now exists — `NativeCircuit` in
+  `crates/relation/src/native.rs`, a second MPT array over the transaction trie
+  plus a `status == 1` check on the receipt. It is **not** ready for
+  `EscrowNative` to embed. Spec 12.9 requires it cost the same as the ERC-20
+  path, and it does not: 17.8M constraints against 10.4M, so proving time
+  identifies the asset kind and splits the anonymity set. It also has no mainnet
+  fixtures and no exported verifier yet. See the README's "Native ETH" section.
 
 ## 7. Test coverage of the success path
 

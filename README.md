@@ -7,9 +7,12 @@ Rust/arkworks circuits for the ZK receipt relation in
 12.1, which freezes Circom + snarkjs. `FINDINGS.md` records why, with measured
 evidence for each rejected alternative — read it before proposing a change.
 
-Status: **step 2 complete.** The relation synthesizes at ~10.4M constraints,
-is satisfied by all 100 mainnet fixtures, and a real proof verifies through the
-exported Solidity verifier on-chain (4,858 bytes, ~222.7k gas).
+Status: **steps 2 and 3 complete.** The ERC-20 relation synthesizes at ~10.4M
+constraints, is satisfied by all 100 mainnet fixtures, and a real proof verifies
+through the exported Solidity verifier on-chain (4,858 bytes, ~222.7k gas). The
+native-ETH relation synthesizes at ~17.8M constraints against synthetic
+fixtures; it has no mainnet corpus yet, and its proving time leaks the asset
+kind. See "Native ETH" below before treating it as shippable.
 
 ## Build order
 
@@ -22,7 +25,7 @@ the proof still verifies, the contract still pays, and nothing looks broken.
 | 1 | Byte-exact encoders and deterministic vectors | **done** — `crates/encoding` |
 | 2a | Keccak and byte primitives | **done** — `crates/gadgets` |
 | 2b | RLP, MPT, receipt relation | **done** — `crates/relation` |
-| 3 | Transaction parser + native dual-trie relation | not started |
+| 3 | Transaction parser + native dual-trie relation | **done** — `crates/gadgets/src/transaction`, `crates/relation/src/native.rs` |
 | 4 | Canonical escrow with embedded verifier | verifier exported and measured; escrow lives in the escrow repo |
 | 5 | Positive delayed-witness ancestry | not started |
 
@@ -44,6 +47,102 @@ provenance differs.
 Step 2 deliberately reveals the transaction block; ancestry is step 5. Building
 them together would make it impossible to tell which half causes a constraint
 blowup.
+
+## Native ETH
+
+A native settlement moves ETH in the transaction itself and emits no log, so
+there is no `Transfer` event to read. The recipient and amount are the
+transaction's own `to` and `value`, which means a second trie:
+
+```
+commitment                 -> recipient / amount, asset kind native
+header -> transactionsRoot -> MPT inclusion -> transaction -> to / value
+header -> receiptsRoot     -> MPT inclusion -> receipt     -> status == 1
+```
+
+Both tries are keyed by the same `rlp(transactionIndex)`, so one key serves both
+walks. The receipt half is not redundant: **a reverted transaction is still in
+the transactions trie** and still names a `to` and a `value`, so a
+transaction-only proof proves an attempt to pay rather than a payment.
+
+`crates/gadgets/src/transaction` parses the three envelope shapes spec 12.6.1
+admits. Note the asymmetry with receipts, which is easy to get wrong by copying:
+
+| Type | Items | `to` | `value` |
+|---|---|---|---|
+| legacy (no prefix) | 9 | 3 | 4 |
+| EIP-2930 (`0x01`) | 11 | 4 | 5 |
+| EIP-1559 (`0x02`) | 12 | 5 | 6 |
+
+Blob (`0x03`) and set-code (`0x04`) transactions are rejected, while the
+*receipt* envelope set accepts both. The item counts differ per shape and
+`decode_list` enforces an exact count, so all three are decoded speculatively
+under their own `active` flags and the fields selected — the same pattern the
+MPT traversal uses for branch versus short nodes, and for the same reason: a
+false constraint does not select away.
+
+### Two soundness bugs the tests caught
+
+Both were written, both passed a naive reading, and both were found only by
+negative tests. Worth knowing because the shapes recur:
+
+- **A zero-value transaction satisfied any commitment.** Comparing the *read*
+  byte against zero outside the value payload is vacuous, because an
+  out-of-range read already yields zero. The assertion has to be about the
+  commitment byte, not the read.
+- **A non-canonical value let a prover choose the amount.** RLP's canonical-form
+  rules govern length bytes and the one-byte-string case; an integer field's
+  payload is arbitrary bytes as far as the decoder is concerned. Minimality is
+  the relation's own obligation, and without it `0x82 0x00 0x01` and `0x01` both
+  encode 1 while the right-alignment reads them a byte apart.
+
+### Proving time leaks the asset kind
+
+**This is a release gate, not a detail.** Spec 12.9 requires the native path
+cost the same as the ERC-20 path, because a settlement whose proving time
+identifies its asset kind splits the anonymity set: an observer timing a
+`collect` learns whether it was ETH or a token before any other analysis.
+
+This build is a separate circuit with its own verification key:
+
+| Relation | Constraints |
+|---|---|
+| ERC-20 (`ReceiptCircuit`) | 10,426,684 |
+| native (`NativeCircuit`) | 17,842,866 |
+
+A 71% difference is not subtle. The second trie array is the whole of it — the
+transaction relation itself is only 1,171,628 constraints at a 512-byte bound,
+which is cheap because the buffer is small.
+
+It also moves the memory ceiling. At the benchmark's ~2.8 GB per million, 17.8M
+is roughly **50 GB** against the ERC-20 path's ~29 GB, with a proportionally
+larger proving key. Groth16 needs the full witness and key resident with no
+streaming path, so an enclave provisioned for the ERC-20 relation will not hold
+this one. Proving time has not been measured; the ~22.6s ERC-20 figure scaled
+linearly would be ~39s, still inside spec 19.7's 75s p95, but that is a
+projection and the setup cost is not yet paid.
+
+Building it standalone was deliberate: it gets the transaction parser reviewed
+in isolation, and it produces the measurement any unification has to be designed
+against. Closing the gap means either padding the ERC-20 relation up to the
+native one's count, or merging both into one circuit whose asset kind selects
+which assertions bind. The latter costs every ERC-20 proof the transaction-trie
+walk it does not need, which is what the measurement above is for.
+
+### What is not done
+
+- **No mainnet fixtures.** All 100 collected fixtures are ERC-20; the collector
+  filters for direct `transfer()` calls and never fetches transaction bodies.
+  The native bounds are therefore reasoned rather than measured, which is
+  exactly the position `MAX_HEADER_BYTES` was in when a 640-byte bound set from
+  one synthetic header was exceeded within five real blocks.
+- **No exported verifier.** `contracts/` holds the ERC-20 verifier only.
+- **`asset_kind` is pinned in the native relation but not the ERC-20 one.**
+  `NativeCircuit` enforces `assetKind == 0`, without which an escrow holding a
+  token row could be collected by sending the same amount of ETH to the same
+  recipient. `ReceiptCircuit` still does not enforce `assetKind == 1`; it fails
+  closed only by accident, because a native row's all-zero token would require a
+  `Transfer` emitted by the zero address.
 
 ## The bounds decide the memory ceiling
 
@@ -130,8 +229,8 @@ fingerprint, since it shrinks the candidate universe an analyst must search.
 circuits/
   crates/
     encoding/   native reference encoders + vector generation (step 1)
-    gadgets/    in-circuit primitives: keccak, bytes, RLP, MPT
-    relation/   the ERC-20 receipt relation built from those gadgets
+    gadgets/    in-circuit primitives: keccak, bytes, RLP, MPT, transaction
+    relation/   the ERC-20 receipt relation and the native dual-trie relation
     prover/     setup, prove, verify, Solidity verifier export
     fixtures/   mainnet collection: receipt-trie rebuild and proof extraction
   contracts/    the exported verifier, a real proof, and its calldata
@@ -247,7 +346,7 @@ Release-mode runtimes, which are wildly uneven — budget for the long ones:
 | Suite | Time |
 |---|---|
 | `encoding`, `fixtures` | instant |
-| `relation` (unit) | ~10s |
+| `relation` (unit, both relations) | ~13s |
 | `gadgets` | ~10min |
 | `relation --test mainnet` | ~8min (100 fixtures, one full system each) |
 
