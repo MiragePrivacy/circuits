@@ -7,10 +7,18 @@ license.workspace = true
 [[bin]]
 name = "collect"
 path = "src/bin/collect.rs"
+required-features = ["collect"]
 
 [dependencies]
 mirage-encoding = { path = "../encoding" }
 serde.workspace = true
 serde_json.workspace = true
 hex.workspace = true
-ureq = { version = "2.10", default-features = false, features = ["tls", "json"] }
+# The collector's JSON-RPC transport. Optional: it pulls rustls and ring, which
+# do not build for Fortanix EDP, and an enclave needs the trie and encoders
+# rather than the fetching.
+ureq = { version = "2.10", default-features = false, features = ["tls", "json"], optional = true }
+
+[features]
+default = ["collect"]
+collect = ["dep:ureq"]
