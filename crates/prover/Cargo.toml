@@ -23,6 +23,11 @@ name = "export-verifier"
 path = "src/bin/export_verifier.rs"
 required-features = ["export"]
 
+[[bin]]
+name = "export-native-verifier"
+path = "src/bin/export_native_verifier.rs"
+required-features = ["export"]
+
 [dependencies]
 ark-groth16.workspace = true
 ark-snark = { version = "0.6", default-features = false }
