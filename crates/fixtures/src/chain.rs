@@ -490,3 +490,313 @@ pub fn inclusion_proof(
         receipts_root: trie.root,
     })
 }
+
+/// A native settlement's inclusion proof under both of a block's tries.
+///
+/// The transaction names the payment and the receipt says whether it happened,
+/// so a native settlement needs both: a reverted transaction still sits in the
+/// transactions trie carrying a `to` and a `value`, and proving only that half
+/// would prove an attempt to pay rather than a payment.
+#[derive(Debug)]
+pub struct NativeInclusion {
+    /// The RLP block header, carrying both roots.
+    pub header: Vec<u8>,
+    /// `rlp(transactionIndex)`. One key serves both tries: they are keyed
+    /// identically over the same entry count.
+    pub key: Vec<u8>,
+    /// The transaction as it appears in its trie, envelope included.
+    pub transaction: Vec<u8>,
+    /// The transaction's inclusion path, root first.
+    pub transaction_nodes: Vec<Vec<u8>>,
+    /// The receipt as it appears in its trie, envelope included.
+    pub receipt: Vec<u8>,
+    /// The receipt's inclusion path, root first.
+    pub receipt_nodes: Vec<Vec<u8>>,
+    pub transactions_root: [u8; 32],
+    pub receipts_root: [u8; 32],
+}
+
+/// Rebuilds both of a block's tries and extracts the native inclusion proof for
+/// `tx_index`.
+///
+/// `block` is an `eth_getBlockByNumber` result with full transaction objects,
+/// and `receipts` an `eth_getBlockReceipts` result for the same block. Every
+/// consistency check is enforced rather than assumed: the header must re-hash
+/// to the block hash, and each rebuilt trie must match its header root. A
+/// witness built on an encoding that disagrees with consensus produces a proof
+/// no verifier accepts, and the failure would otherwise surface only after the
+/// executor has fronted the transfer.
+pub fn native_inclusion_proof(
+    block: &Value,
+    receipts: &[Value],
+    tx_index: usize,
+) -> Result<NativeInclusion, String> {
+    let header = encode_header(block)?;
+    let block_hash = block["hash"].as_str().ok_or("block hash")?;
+    if hex_str(&hash(&header)) != block_hash {
+        return Err(format!(
+            "header hash mismatch: built {} want {block_hash}",
+            hex_str(&hash(&header))
+        ));
+    }
+
+    let transactions = block["transactions"]
+        .as_array()
+        .ok_or("block has no transaction array")?;
+    if transactions.len() != receipts.len() {
+        return Err(format!(
+            "{} transactions but {} receipts",
+            transactions.len(),
+            receipts.len()
+        ));
+    }
+
+    let encoded_txs: Result<Vec<Vec<u8>>, String> =
+        transactions.iter().map(encode_transaction).collect();
+    let encoded_txs = encoded_txs?;
+    let transaction = encoded_txs
+        .get(tx_index)
+        .ok_or_else(|| {
+            format!(
+                "tx index {tx_index} past the block's {} transactions",
+                encoded_txs.len()
+            )
+        })?
+        .clone();
+    let tx_trie = Trie::build(&encoded_txs);
+    let want_tx_root = block["transactionsRoot"]
+        .as_str()
+        .ok_or("transactionsRoot")?;
+    if hex_str(&tx_trie.root) != want_tx_root {
+        return Err(format!(
+            "transactionsRoot mismatch: built {} want {want_tx_root}",
+            hex_str(&tx_trie.root)
+        ));
+    }
+
+    let encoded_receipts: Result<Vec<Vec<u8>>, String> =
+        receipts.iter().map(encode_receipt).collect();
+    let encoded_receipts = encoded_receipts?;
+    let receipt = encoded_receipts
+        .get(tx_index)
+        .ok_or_else(|| {
+            format!(
+                "tx index {tx_index} past the block's {} receipts",
+                encoded_receipts.len()
+            )
+        })?
+        .clone();
+    let receipt_trie = Trie::build(&encoded_receipts);
+    let want_receipt_root = block["receiptsRoot"].as_str().ok_or("receiptsRoot")?;
+    if hex_str(&receipt_trie.root) != want_receipt_root {
+        return Err(format!(
+            "receiptsRoot mismatch: built {} want {want_receipt_root}",
+            hex_str(&receipt_trie.root)
+        ));
+    }
+
+    let key = key_for(tx_index);
+    Ok(NativeInclusion {
+        header,
+        transaction_nodes: tx_trie.proof(&key)?,
+        receipt_nodes: receipt_trie.proof(&key)?,
+        key,
+        transaction,
+        receipt,
+        transactions_root: tx_trie.root,
+        receipts_root: receipt_trie.root,
+    })
+}
+
+#[cfg(test)]
+mod native_inclusion_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A block carrying `n` bare EIP-1559 sends, with both roots and the block
+    /// hash filled in from the encoders under test.
+    ///
+    /// Self-consistent by construction, which is the point: the helper's
+    /// consistency checks are what this exercises, and a fixture built by hand
+    /// could not satisfy them. Real-chain agreement is covered separately by
+    /// the 143-fixture dataset, which was collected against mainnet roots.
+    fn block_with(n: usize) -> (Value, Vec<Value>) {
+        let txs: Vec<Value> = (0..n)
+            .map(|i| {
+                json!({
+                    "type": "0x2",
+                    "chainId": "0x1",
+                    "nonce": format!("0x{i:x}"),
+                    "maxPriorityFeePerGas": "0x1",
+                    "maxFeePerGas": "0x2",
+                    "gas": "0x5208",
+                    "to": format!("0x{:040x}", i + 1),
+                    "value": "0xde0b6b3a7640000",
+                    "input": "0x",
+                    "accessList": [],
+                    "v": "0x0",
+                    "r": format!("0x{:064x}", i + 7),
+                    "s": format!("0x{:064x}", i + 9),
+                    "hash": format!("0x{:064x}", i),
+                })
+            })
+            .collect();
+        let receipts: Vec<Value> = (0..n)
+            .map(|i| {
+                json!({
+                    "type": "0x2",
+                    "status": "0x1",
+                    "cumulativeGasUsed": format!("0x{:x}", (i + 1) * 21_000),
+                    "logsBloom": format!("0x{}", "00".repeat(256)),
+                    "logs": [],
+                })
+            })
+            .collect();
+
+        let encoded_txs: Vec<Vec<u8>> =
+            txs.iter().map(|t| encode_transaction(t).unwrap()).collect();
+        let encoded_receipts: Vec<Vec<u8>> = receipts
+            .iter()
+            .map(|r| encode_receipt(r).unwrap())
+            .collect();
+
+        let mut block = json!({
+            "parentHash": format!("0x{:064x}", 0xaa),
+            "sha3Uncles": format!("0x{:064x}", 0xbb),
+            "miner": format!("0x{:040x}", 0xcc),
+            "stateRoot": format!("0x{:064x}", 0xdd),
+            "transactionsRoot": hex_str(&Trie::build(&encoded_txs).root),
+            "receiptsRoot": hex_str(&Trie::build(&encoded_receipts).root),
+            "logsBloom": format!("0x{}", "00".repeat(256)),
+            "difficulty": "0x0",
+            "number": "0x1406f40",
+            "gasLimit": "0x1c9c380",
+            "gasUsed": "0x5208",
+            "timestamp": "0x66000000",
+            "extraData": "0x",
+            "mixHash": format!("0x{:064x}", 0xee),
+            "nonce": "0x0000000000000000",
+            "baseFeePerGas": "0x7",
+            "withdrawalsRoot": format!("0x{:064x}", 0xff),
+            "blobGasUsed": "0x0",
+            "excessBlobGas": "0x0",
+            "parentBeaconBlockRoot": format!("0x{:064x}", 0x11),
+            "requestsHash": format!("0x{:064x}", 0x22),
+            "transactions": txs,
+        });
+        // The helper checks the header re-hashes to this, so it must be derived
+        // rather than invented.
+        let header = encode_header(&block).unwrap();
+        block["hash"] = json!(hex_str(&hash(&header)));
+        (block, receipts)
+    }
+
+    /// The proof extracted for an index must carry that index's own transaction
+    /// and receipt, under roots matching the header.
+    #[test]
+    fn extracts_a_consistent_dual_proof() {
+        let (block, receipts) = block_with(6);
+        for index in [0usize, 3, 5] {
+            let got = native_inclusion_proof(&block, &receipts, index).expect("inclusion");
+
+            assert_eq!(got.key, key_for(index), "key is not rlp(index)");
+            assert_eq!(
+                hex_str(&got.transactions_root),
+                block["transactionsRoot"].as_str().unwrap(),
+                "transactions root disagrees with the header"
+            );
+            assert_eq!(
+                hex_str(&got.receipts_root),
+                block["receiptsRoot"].as_str().unwrap(),
+                "receipts root disagrees with the header"
+            );
+            assert_eq!(
+                got.transaction,
+                encode_transaction(&block["transactions"][index]).unwrap(),
+                "extracted the wrong transaction"
+            );
+            assert_eq!(
+                got.receipt,
+                encode_receipt(&receipts[index]).unwrap(),
+                "extracted the wrong receipt"
+            );
+            assert!(!got.transaction_nodes.is_empty(), "empty transaction path");
+            assert!(!got.receipt_nodes.is_empty(), "empty receipt path");
+        }
+    }
+
+    /// Both tries are keyed identically over the same entries, so a settlement's
+    /// two paths have the same depth. The relation relies on this: one key
+    /// serves both walks.
+    #[test]
+    fn both_tries_share_one_key_and_depth() {
+        let (block, receipts) = block_with(40);
+        let got = native_inclusion_proof(&block, &receipts, 17).expect("inclusion");
+        assert_eq!(
+            got.transaction_nodes.len(),
+            got.receipt_nodes.len(),
+            "tries of the same shape produced different depths"
+        );
+    }
+
+    /// A root that disagrees with the rebuilt trie means the encoding disagrees
+    /// with consensus. Failing here is the whole point: a witness built on it
+    /// would prove against a statement no verifier accepts.
+    #[test]
+    fn rejects_a_root_that_disagrees() {
+        // The hash is restamped after each mutation, so the header still
+        // re-hashes and the root check is what fires rather than the hash one.
+        let restamp = |b: &mut Value| {
+            let h = encode_header(b).unwrap();
+            b["hash"] = json!(hex_str(&hash(&h)));
+        };
+
+        let (mut block, receipts) = block_with(4);
+        block["receiptsRoot"] = json!(format!("0x{:064x}", 0x99));
+        restamp(&mut block);
+        let err = native_inclusion_proof(&block, &receipts, 1).expect_err("must reject");
+        assert!(
+            err.contains("receiptsRoot mismatch"),
+            "unexpected error: {err}"
+        );
+
+        let (mut block, receipts) = block_with(4);
+        block["transactionsRoot"] = json!(format!("0x{:064x}", 0x99));
+        restamp(&mut block);
+        let err = native_inclusion_proof(&block, &receipts, 1).expect_err("must reject");
+        assert!(
+            err.contains("transactionsRoot mismatch"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// A header that does not re-hash to the block hash means the schema
+    /// drifted, and every root read out of it is suspect.
+    #[test]
+    fn rejects_a_header_that_does_not_rehash() {
+        let (mut block, receipts) = block_with(3);
+        block["hash"] = json!(format!("0x{:064x}", 0x99));
+        let err = native_inclusion_proof(&block, &receipts, 0).expect_err("must reject");
+        assert!(
+            err.contains("header hash mismatch"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// An index past the block is a caller error, not a silent empty proof.
+    #[test]
+    fn rejects_an_index_past_the_block() {
+        let (block, receipts) = block_with(3);
+        let err = native_inclusion_proof(&block, &receipts, 9).expect_err("must reject");
+        assert!(err.contains("past the block"), "unexpected error: {err}");
+    }
+
+    /// Mismatched counts mean the two RPC results are not for the same block.
+    #[test]
+    fn rejects_receipts_that_do_not_match_the_transactions() {
+        let (block, mut receipts) = block_with(5);
+        receipts.pop();
+        let err = native_inclusion_proof(&block, &receipts, 0).expect_err("must reject");
+        assert!(err.contains("transactions but"), "unexpected error: {err}");
+    }
+}
