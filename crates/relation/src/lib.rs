@@ -442,6 +442,20 @@ fn native_signals(c: &StatementContext) -> (u128, u128) {
 pub mod fixture {
     use super::Witness;
 
+    /// The escrow address the fixture statement commits to.
+    ///
+    /// This is what a `CREATE` from `0x01..01` at nonce 0 produces, so a
+    /// consumer can deploy the escrow at this address rather than relocating
+    /// it. That matters because the escrow caches its EIP-712 domain separator
+    /// over `address(this)` at construction: a copy moved after deployment
+    /// carries the separator of wherever it was built, and every bond
+    /// signature checked against it fails. Keeping the address reachable lets
+    /// the whole fund/bond/collect chain run against this proof.
+    pub const FIXTURE_ESCROW: [u8; 20] = [
+        0x1c, 0x81, 0xa6, 0x1a, 0x40, 0x70, 0x17, 0xc5, 0x83, 0x97, 0xa4, 0x7d, 0x2a, 0xb2, 0x81,
+        0x91, 0xb9, 0xb8, 0xec, 0x9b,
+    ];
+
     fn enc_str(p: &[u8]) -> Vec<u8> {
         if p.len() == 1 && p[0] < 0x80 {
             return p.to_vec();
@@ -556,7 +570,14 @@ pub mod fixture {
         let intent = super::IntentOpening {
             instance_domain: [0x11; 32],
             chain_id: 1,
-            escrow: [0x22; 20],
+            // The address a CREATE from 0x01..01 at nonce 0 produces. The
+            // escrow caches its EIP-712 domain separator over `address(this)`
+            // at construction, so a consumer that wants a working `bond()` has
+            // to deploy the contract rather than relocate it: a relocated copy
+            // carries the separator of wherever it was built, and its bond
+            // signatures no longer validate. A reachable address keeps the
+            // whole fund/bond/collect chain exercisable.
+            escrow: FIXTURE_ESCROW,
             request_id: [0x33; 32],
             row_index: 0,
             asset_kind: 1,
@@ -596,7 +617,7 @@ pub mod fixture {
             statement: super::StatementContext {
                 instance_domain: [0x11; 32],
                 chain_id: 1,
-                escrow: [0x22; 20],
+                escrow: FIXTURE_ESCROW,
                 request_id: [0x33; 32],
                 row_index: 0,
                 // The escrow's stored commitment, so the opening above binds
