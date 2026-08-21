@@ -582,7 +582,7 @@ pub mod fixture {
         // The header must carry the trie's actual root, or the binding chain
         // header -> receiptsRoot -> inclusion does not close.
         let root_hash = keccak(&root_node);
-        let header = header_with_receipts_root(&root_hash, 21_000_000);
+        let header = header_with_receipts_root(&root_hash, 20_999_910);
         let header_hash = keccak(&header);
 
         Witness {
@@ -603,8 +603,15 @@ pub mod fixture {
                 // to what the statement hash carries.
                 intent_commitment: commitment,
                 bond_attempt: 1,
+                // A lease a real `bond()` can actually grant: the escrow sets
+                // `bondStartBlock = block.number` and
+                // `executionDeadline = block.number + BOND_DURATION_BLOCKS`,
+                // which is 25. A wider lease makes the proof unusable by any
+                // caller that bonded through the contract rather than by
+                // writing storage, so the consumers of this fixture would have
+                // to forge the bond state to spend it.
                 bond_start_block: 20_999_900,
-                bond_deadline: 21_000_080,
+                bond_deadline: 20_999_925,
                 bonded_collector: [0x55; 20],
                 // An ERC-20 payout asset, not native. The escrow that consumes
                 // this fixture is EscrowERC20, which rejects a zero payout
@@ -615,7 +622,7 @@ pub mod fixture {
                     a[24..].copy_from_slice(&1_000_000_000u64.to_be_bytes());
                     a
                 },
-                witness_block_number: 21_000_000,
+                witness_block_number: 20_999_910,
                 witness_block_hash: header_hash,
             },
         }
