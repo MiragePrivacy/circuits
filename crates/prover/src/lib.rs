@@ -338,3 +338,135 @@ pub struct VerifyingKeyConstants {
     /// this relation's two signals.
     pub ic: Vec<[[u8; 32]; 2]>,
 }
+/// Setup, proving, and bounds checking for the native-ETH relation.
+///
+/// A separate circuit means a separate key: Groth16's verifying key is derived
+/// from the constraint system, so a native proof does not verify against the
+/// ERC-20 key and an escrow embeds whichever verifier matches the asset it
+/// settles. The two paths therefore run the whole pipeline independently, which
+/// is why these are distinct functions rather than a parameter on the existing
+/// ones.
+///
+/// Read [`mirage_relation::native`] before deploying either: the relations have
+/// different constraint counts, so proving time distinguishes the asset kind,
+/// which spec 12.9 forbids.
+pub mod native {
+    use super::{
+        proof_points, Bn254, Fr, Groth16, Keys, PreparedVerifyingKey, SeedableRng, Settlement,
+        SettlementError, SNARK,
+    };
+    use mirage_relation::native::{NativeBounds, NativeCircuit, NativeWitness};
+
+    /// Runs the circuit-specific setup for the native relation.
+    ///
+    /// The same toy stand-in for spec 18.2's multiparty Phase 2 that [`super::setup`]
+    /// is, and costs more: the native relation is ~1.7x the ERC-20 relation's
+    /// constraint count.
+    pub fn setup(bounds: NativeBounds, seed: u64) -> Result<Keys, SettlementError> {
+        let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(seed);
+        let (pk, vk) =
+            Groth16::<Bn254>::circuit_specific_setup(NativeCircuit::setup(bounds), &mut rng)
+                .map_err(|e| SettlementError::Setup(e.to_string()))?;
+        Ok(Keys { pk, vk })
+    }
+
+    /// Proves a native settlement, checking the proof natively before returning.
+    ///
+    /// Same self-check rationale as [`super::prove`]: a proof that fails on-chain
+    /// after the transfer has been fronted is an executor loss under spec 12.9.
+    pub fn prove<R: ark_std::rand::RngCore + ark_std::rand::CryptoRng>(
+        keys: &Keys,
+        bounds: NativeBounds,
+        witness: &NativeWitness,
+        rng: &mut R,
+    ) -> Result<Settlement, SettlementError> {
+        check_bounds(bounds, witness)?;
+        let (hi, lo) = mirage_relation::native::public_signals(witness);
+        let proof =
+            Groth16::<Bn254>::prove(&keys.pk, NativeCircuit::prove(bounds, witness.clone()), rng)
+                .map_err(|e| SettlementError::Prove(e.to_string()))?;
+
+        let pvk = PreparedVerifyingKey::from(keys.vk.clone());
+        let ok =
+            Groth16::<Bn254>::verify_with_processed_vk(&pvk, &[Fr::from(hi), Fr::from(lo)], &proof)
+                .map_err(|e| SettlementError::Verify(e.to_string()))?;
+        if !ok {
+            return Err(SettlementError::SelfCheck);
+        }
+
+        Ok(Settlement {
+            proof: proof_points(&proof),
+            signals: [hi, lo],
+        })
+    }
+
+    /// [`prove`] with a seeded RNG, for artifacts that must reproduce byte-exactly.
+    ///
+    /// Not for production settlements, for the reason in [`super::prove_seeded`].
+    pub fn prove_seeded(
+        keys: &Keys,
+        bounds: NativeBounds,
+        witness: &NativeWitness,
+        seed: u64,
+    ) -> Result<Settlement, SettlementError> {
+        let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(seed);
+        prove(keys, bounds, witness, &mut rng)
+    }
+
+    /// Checks a native witness against the compiled bounds before proving.
+    ///
+    /// Covers both tries. The transaction side is the half the ERC-20 check has
+    /// no equivalent for, and it is the one most likely to bite: a transaction
+    /// carrying calldata blows past `transaction_bytes` where a bare send sits
+    /// well inside it.
+    pub fn check_bounds(bounds: NativeBounds, w: &NativeWitness) -> Result<(), SettlementError> {
+        let over = |what: &str, got: usize, max: usize| {
+            Err(SettlementError::Bounds(format!(
+                "{what} is {got} bytes, bound is {max}"
+            )))
+        };
+        if w.header.len() > bounds.common.header_bytes {
+            return over("header", w.header.len(), bounds.common.header_bytes);
+        }
+        if w.key.len() > bounds.common.key_bytes {
+            return over("trie key", w.key.len(), bounds.common.key_bytes);
+        }
+
+        if w.transaction.len() > bounds.transaction_bytes {
+            return over("transaction", w.transaction.len(), bounds.transaction_bytes);
+        }
+        if w.transaction_nodes.len() > bounds.transaction_depth {
+            return over(
+                "transaction trie depth",
+                w.transaction_nodes.len(),
+                bounds.transaction_depth,
+            );
+        }
+        if let Some(n) = w
+            .transaction_nodes
+            .iter()
+            .find(|n| n.len() > bounds.transaction_node_bytes)
+        {
+            return over(
+                "transaction trie node",
+                n.len(),
+                bounds.transaction_node_bytes,
+            );
+        }
+
+        if w.receipt.len() > bounds.common.receipt_bytes {
+            return over("receipt", w.receipt.len(), bounds.common.receipt_bytes);
+        }
+        if w.receipt_nodes.len() > bounds.common.depth {
+            return over("receipt trie depth", w.receipt_nodes.len(), bounds.common.depth);
+        }
+        if let Some(n) = w
+            .receipt_nodes
+            .iter()
+            .find(|n| n.len() > bounds.common.node_bytes)
+        {
+            return over("receipt trie node", n.len(), bounds.common.node_bytes);
+        }
+        Ok(())
+    }
+}
