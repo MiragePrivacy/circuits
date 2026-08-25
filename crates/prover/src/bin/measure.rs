@@ -61,7 +61,10 @@ fn main() {
         .expect("synthesis");
     let satisfied = cs.is_satisfied().expect("satisfiability");
     let n = cs.num_constraints();
-    println!("synthesis:    {:>8.1}s   {n} constraints, satisfied={satisfied}", t.elapsed().as_secs_f64());
+    println!(
+        "synthesis:    {:>8.1}s   {n} constraints, satisfied={satisfied}",
+        t.elapsed().as_secs_f64()
+    );
     assert!(satisfied, "witness does not satisfy the circuit");
     drop(cs);
 
@@ -73,8 +76,9 @@ fn main() {
     // artifact through a sound process.
     let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(0);
     let t = Instant::now();
-    let (pk, vk) = Groth16::<Bn254>::circuit_specific_setup(ReceiptCircuit::setup(bounds), &mut rng)
-        .expect("setup");
+    let (pk, vk) =
+        Groth16::<Bn254>::circuit_specific_setup(ReceiptCircuit::setup(bounds), &mut rng)
+            .expect("setup");
     let setup_secs = t.elapsed().as_secs_f64();
     let pk_bytes = pk.serialized_size(ark_serialize::Compress::No);
     let pk_compressed = pk.serialized_size(ark_serialize::Compress::Yes);
@@ -86,8 +90,12 @@ fn main() {
 
     // ---- prove ----
     let t = Instant::now();
-    let proof = Groth16::<Bn254>::prove(&pk, ReceiptCircuit::prove(bounds, fixture::genuine()), &mut rng)
-        .expect("prove");
+    let proof = Groth16::<Bn254>::prove(
+        &pk,
+        ReceiptCircuit::prove(bounds, fixture::genuine()),
+        &mut rng,
+    )
+    .expect("prove");
     let prove_secs = t.elapsed().as_secs_f64();
     println!("prove:        {prove_secs:>8.1}s");
 

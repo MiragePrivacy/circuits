@@ -18,7 +18,8 @@ use crate::trie::{key_for, Trie};
 use crate::{from_hex, from_hex_fixed, from_hex_quantity, hash, hex_str};
 
 /// `Transfer(address,address,uint256)`.
-pub const TRANSFER_TOPIC0: &str = "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+pub const TRANSFER_TOPIC0: &str =
+    "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
 
 /// The RLP block header, in the frozen 21-field post-Prague layout.
 ///
@@ -32,7 +33,8 @@ pub fn encode_header(h: &Value) -> Result<Vec<u8>, String> {
             .and_then(|v| v.as_str())
             .ok_or_else(|| format!("header missing {k}"))
     };
-    let fixed = |k: &str, n: usize| -> Result<Item, String> { Ok(Item::Str(from_hex_fixed(f(k)?, n)?)) };
+    let fixed =
+        |k: &str, n: usize| -> Result<Item, String> { Ok(Item::Str(from_hex_fixed(f(k)?, n)?)) };
     let qty = |k: &str| -> Result<Item, String> { Ok(Item::Str(from_hex_quantity(f(k)?)?)) };
 
     let extra = from_hex(f("extraData")?)?;
@@ -88,7 +90,10 @@ pub fn encode_receipt(r: &Value) -> Result<Vec<u8>, String> {
         .collect();
 
     let status = u64::from_str_radix(
-        r["status"].as_str().ok_or("status")?.trim_start_matches("0x"),
+        r["status"]
+            .as_str()
+            .ok_or("status")?
+            .trim_start_matches("0x"),
         16,
     )
     .map_err(|e| e.to_string())?;
@@ -104,7 +109,10 @@ pub fn encode_receipt(r: &Value) -> Result<Vec<u8>, String> {
     let payload = Item::List(vec![
         Item::int(status),
         Item::int(gas),
-        Item::Str(from_hex_fixed(r["logsBloom"].as_str().ok_or("bloom")?, 256)?),
+        Item::Str(from_hex_fixed(
+            r["logsBloom"].as_str().ok_or("bloom")?,
+            256,
+        )?),
         Item::List(logs?),
     ])
     .encode();
@@ -198,7 +206,12 @@ pub fn inclusion_proof(
     let encoded = encoded?;
     let receipt = encoded
         .get(tx_index)
-        .ok_or_else(|| format!("tx index {tx_index} past the block's {} receipts", encoded.len()))?
+        .ok_or_else(|| {
+            format!(
+                "tx index {tx_index} past the block's {} receipts",
+                encoded.len()
+            )
+        })?
         .clone();
 
     let trie = Trie::build(&encoded);

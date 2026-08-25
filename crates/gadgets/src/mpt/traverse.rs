@@ -172,8 +172,7 @@ impl<F: PrimeField> MptVerifier<F> for Traversal {
             // ---- branch case: follow the nibble's child (invariant 3) ----
             profile(&level.bytes, "decoders", &mut mark);
             let nibble = nibble_at(key, &consumed)?;
-            let child_offset =
-                branch_child_offset(&branch, &nibble, &branch_active)?;
+            let child_offset = branch_child_offset(&branch, &nibble, &branch_active)?;
 
             // ---- short case: read flags and match the path (invariant 4) ----
             profile(&level.bytes, "child-hash", &mut mark);
@@ -207,7 +206,6 @@ impl<F: PrimeField> MptVerifier<F> for Traversal {
                 &short_active,
             )?;
 
-
             // An extension's tail is the child reference the walk follows next.
             //
             // Only 32 bytes are read, but at ~10 constraints per buffer byte
@@ -223,11 +221,8 @@ impl<F: PrimeField> MptVerifier<F> for Traversal {
             // over a 544-byte node is ~160k constraints, and doing it twice was
             // 18% of a level.
             profile(&level.bytes, "path-match", &mut mark);
-            let next_offset = FpVar::conditionally_select(
-                &this_is_branch,
-                &child_offset,
-                &short.tail_offset,
-            )?;
+            let next_offset =
+                FpVar::conditionally_select(&this_is_branch, &child_offset, &short.tail_offset)?;
             let next_ref = select_bytes(&level.bytes, &next_offset, 32)?;
 
             // ---- terminate or descend ----
@@ -250,18 +245,13 @@ impl<F: PrimeField> MptVerifier<F> for Traversal {
             // every level costs ~2M each.
             let is_term = active.clone() & terminates.clone();
             term_node = select_bytes_cond(&level.bytes, &term_node, &is_term)?;
-            term_offset =
-                FpVar::conditionally_select(&is_term, &short.tail_offset, &term_offset)?;
+            term_offset = FpVar::conditionally_select(&is_term, &short.tail_offset, &term_offset)?;
             term_len = FpVar::conditionally_select(&is_term, &short.tail_len, &term_len)?;
 
             profile(&level.bytes, "consume+value", &mut mark);
             // Advance. A branch consumes one nibble, an extension consumes its
             // path, a leaf ends the walk.
-            let step = FpVar::conditionally_select(
-                &this_is_branch,
-                &FpVar::one(),
-                &path_nibbles,
-            )?;
+            let step = FpVar::conditionally_select(&this_is_branch, &FpVar::one(), &path_nibbles)?;
             consumed = FpVar::conditionally_select(
                 &(active.clone() & !terminates.clone()),
                 &(&consumed + &step),
@@ -269,7 +259,11 @@ impl<F: PrimeField> MptVerifier<F> for Traversal {
             )?;
 
             // The next expected hash.
-            expected = cond_select_bytes(&next_ref, &expected, &(active.clone() & !terminates.clone()))?;
+            expected = cond_select_bytes(
+                &next_ref,
+                &expected,
+                &(active.clone() & !terminates.clone()),
+            )?;
 
             profile(&level.bytes, "advance", &mut mark);
             // Invariant 7: nothing may follow a termination.

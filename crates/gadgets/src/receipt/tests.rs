@@ -78,14 +78,15 @@ pub fn log_item(emitter: &[u8; 20], topics: &[Vec<u8>], data: &[u8]) -> Vec<u8> 
 }
 
 /// A canonical ERC-20 Transfer log.
-pub fn transfer_log(token: &[u8; 20], from: &[u8; 20], to: &[u8; 20], amount: &[u8; 32]) -> Vec<u8> {
+pub fn transfer_log(
+    token: &[u8; 20],
+    from: &[u8; 20],
+    to: &[u8; 20],
+    amount: &[u8; 32],
+) -> Vec<u8> {
     log_item(
         token,
-        &[
-            transfer_topic0().to_vec(),
-            addr_topic(from),
-            addr_topic(to),
-        ],
+        &[transfer_topic0().to_vec(), addr_topic(from), addr_topic(to)],
         amount,
     )
 }
@@ -136,7 +137,12 @@ fn cs() -> ConstraintSystemRef<Fr> {
     ConstraintSystem::<Fr>::new_ref()
 }
 
-fn intent(token: &[u8; 20], recipient: &[u8; 20], amt: &[u8; 32], c: ConstraintSystemRef<Fr>) -> Intent<Fr> {
+fn intent(
+    token: &[u8; 20],
+    recipient: &[u8; 20],
+    amt: &[u8; 32],
+    c: ConstraintSystemRef<Fr>,
+) -> Intent<Fr> {
     Intent {
         token: alloc_bounded(c.clone(), token, 20).unwrap(),
         recipient: alloc_bounded(c.clone(), recipient, 20).unwrap(),
@@ -250,7 +256,10 @@ pub fn fixtures_are_well_formed() {
 
     let (r, _, _) = genuine();
     assert_eq!(r[0], 0x02, "typed prefix");
-    assert!(r.len() < TEST_RECEIPT_BYTES, "fixture exceeds the test bound");
+    assert!(
+        r.len() < TEST_RECEIPT_BYTES,
+        "fixture exceeds the test bound"
+    );
 
     // logsBloom is 256 bytes, so its RLP header is 0xb9 0x01 0x00.
     let legacy = receipt(1, &[], None);
@@ -645,11 +654,19 @@ fn single_log_cost() {
             let before = c.num_constraints();
             if single {
                 let _ = <super::log::Erc20SingleLog as ReceiptRelation<Fr>>::verify(
-                    &buf, &len, &idx, &it, &Boolean::TRUE,
+                    &buf,
+                    &len,
+                    &idx,
+                    &it,
+                    &Boolean::TRUE,
                 );
             } else {
                 let _ = <super::log::Erc20 as ReceiptRelation<Fr>>::verify(
-                    &buf, &len, &idx, &it, &Boolean::TRUE,
+                    &buf,
+                    &len,
+                    &idx,
+                    &it,
+                    &Boolean::TRUE,
                 );
             }
             costs.push(c.num_constraints() - before);
@@ -678,9 +695,8 @@ fn cost() {
         let i = FpVar::new_witness(c.clone(), || Ok(Fr::from(idx as u64))).unwrap();
         let it = intent(&TOKEN, &RECIPIENT, &amt, c.clone());
         let before = c.num_constraints();
-        let _ = <super::log::Erc20 as ReceiptRelation<Fr>>::verify(
-            &buf, &len, &i, &it, &Boolean::TRUE,
-        );
+        let _ =
+            <super::log::Erc20 as ReceiptRelation<Fr>>::verify(&buf, &len, &i, &it, &Boolean::TRUE);
         println!(
             "receipt relation, {bound} byte bound: {} constraints",
             c.num_constraints() - before
@@ -715,7 +731,10 @@ fn log_walk_cost() {
     let check = c.num_constraints() - before_check;
 
     println!("envelope parse:   {env}");
-    println!("log walk:         {walk}   <- {} MAX_LOGS steps", crate::bounds::MAX_LOGS);
+    println!(
+        "log walk:         {walk}   <- {} MAX_LOGS steps",
+        crate::bounds::MAX_LOGS
+    );
     println!("transfer checks:  {check}");
     println!("total:            {}", env + walk + check);
 }
@@ -767,7 +786,9 @@ fn forgeries_defeat_the_null_relation() {
         ("unsupported_envelope", || {
             rejects_unsupported_envelope::<Null>()
         }),
-        ("wrong_bloom_length", || rejects_wrong_bloom_length::<Null>()),
+        ("wrong_bloom_length", || {
+            rejects_wrong_bloom_length::<Null>()
+        }),
         ("wrong_payload_field_count", || {
             rejects_wrong_payload_field_count::<Null>()
         }),

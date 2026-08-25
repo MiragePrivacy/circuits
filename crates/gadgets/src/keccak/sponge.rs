@@ -69,10 +69,7 @@ fn empty_state<F: PrimeField>() -> State<F> {
 /// `8j..8j+8` little-endian. That convention is what removes ZoKrates'
 /// explicit `swap_u64` calls: with a bit array, the byte order is an indexing
 /// choice rather than a computation.
-fn absorb_block<F: PrimeField>(
-    st: &mut State<F>,
-    block: &[Byte<F>],
-) -> Result<(), SynthesisError> {
+fn absorb_block<F: PrimeField>(st: &mut State<F>, block: &[Byte<F>]) -> Result<(), SynthesisError> {
     debug_assert!(block.len() <= RATE);
     for (byte_idx, byte) in block.iter().enumerate() {
         let lane = byte_idx / 8;
@@ -199,7 +196,11 @@ pub fn keccak256_var<F: PrimeField>(
     let mut message = Vec::with_capacity(padded_len);
     for i in 0..padded_len {
         // In-range real byte, or zero past the buffer.
-        let real = if i < max { buf[i].clone() } else { zero.clone() };
+        let real = if i < max {
+            buf[i].clone()
+        } else {
+            zero.clone()
+        };
 
         // Is this the last byte of the block containing the padding start?
         let is_block_end = (i + 1) % RATE == 0;
@@ -315,7 +316,11 @@ mod tests {
             "digest mismatch for {} byte input",
             data.len()
         );
-        assert!(cs.is_satisfied().unwrap(), "unsatisfied for len {}", data.len());
+        assert!(
+            cs.is_satisfied().unwrap(),
+            "unsatisfied for len {}",
+            data.len()
+        );
     }
 
     #[test]
@@ -470,7 +475,10 @@ mod tests {
             let before = cs.num_constraints();
             let _ = keccak256_fixed(&input).unwrap();
             let cost = cs.num_constraints() - before;
-            println!("{len} bytes ({blocks} blocks): {cost} constraints, {} per block", cost / blocks);
+            println!(
+                "{len} bytes ({blocks} blocks): {cost} constraints, {} per block",
+                cost / blocks
+            );
         }
     }
 }

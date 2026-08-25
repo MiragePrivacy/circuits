@@ -36,8 +36,8 @@ use ark_r1cs_std::uint8::UInt8;
 use ark_relations::gr1cs::SynthesisError;
 
 use super::Intent;
-use crate::bytes::{lt, one_hot, select_bytes, zero_like};
 use crate::bounds::MAX_LOGS;
+use crate::bytes::{lt, one_hot, select_bytes, zero_like};
 use crate::rlp::{cursor::Cursor, Item, RlpDecoder};
 
 /// keccak256("Transfer(address,address,uint256)")
@@ -192,7 +192,8 @@ pub fn sole_log<F: PrimeField>(
     active: &Boolean<F>,
 ) -> Result<Item<F>, SynthesisError> {
     let log = Cursor::decode_item(receipt, &logs.offset, active)?;
-    log.is_list.conditional_enforce_equal(&Boolean::TRUE, active)?;
+    log.is_list
+        .conditional_enforce_equal(&Boolean::TRUE, active)?;
 
     // Exactly one: the log must fill the list. Without this a prover appends a
     // second event whose contents the relation never inspects, which is the

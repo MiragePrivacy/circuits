@@ -130,10 +130,7 @@ pub fn compute<F: PrimeField>(ctx: &Context<F>) -> Result<Signals<F>, SynthesisE
     // The digest as 32 bytes, then split into two 16-byte limbs. 16 bytes is
     // always below the BN254 modulus, so each packing is injective; 32 would
     // alias.
-    let digest: Vec<UInt8<F>> = digest_bits
-        .iter()
-        .map(|b| UInt8::from_bits_le(b))
-        .collect();
+    let digest: Vec<UInt8<F>> = digest_bits.iter().map(|b| UInt8::from_bits_le(b)).collect();
 
     Ok(Signals {
         hi: pack_bytes_16(&digest[..16])?,
@@ -245,20 +242,62 @@ mod tests {
         };
 
         let mutations: Vec<Statement> = vec![
-            Statement { instance_domain: [0x12; 32], ..native_sample() },
-            Statement { chain_id: 2, ..native_sample() },
-            Statement { escrow: [0x23; 20], ..native_sample() },
-            Statement { request_id: [0x34; 32], ..native_sample() },
-            Statement { row_index: 8, ..native_sample() },
-            Statement { intent_commitment: [0x45; 32], ..native_sample() },
-            Statement { bond_attempt: 4, ..native_sample() },
-            Statement { bond_start_block: 1001, ..native_sample() },
-            Statement { bond_deadline: 1181, ..native_sample() },
-            Statement { bonded_collector: [0x56; 20], ..native_sample() },
-            Statement { row_payout_asset: [0x01; 20], ..native_sample() },
-            Statement { row_payout_amount: [0x01; 32], ..native_sample() },
-            Statement { witness_block_number: 1101, ..native_sample() },
-            Statement { witness_block_hash: [0x67; 32], ..native_sample() },
+            Statement {
+                instance_domain: [0x12; 32],
+                ..native_sample()
+            },
+            Statement {
+                chain_id: 2,
+                ..native_sample()
+            },
+            Statement {
+                escrow: [0x23; 20],
+                ..native_sample()
+            },
+            Statement {
+                request_id: [0x34; 32],
+                ..native_sample()
+            },
+            Statement {
+                row_index: 8,
+                ..native_sample()
+            },
+            Statement {
+                intent_commitment: [0x45; 32],
+                ..native_sample()
+            },
+            Statement {
+                bond_attempt: 4,
+                ..native_sample()
+            },
+            Statement {
+                bond_start_block: 1001,
+                ..native_sample()
+            },
+            Statement {
+                bond_deadline: 1181,
+                ..native_sample()
+            },
+            Statement {
+                bonded_collector: [0x56; 20],
+                ..native_sample()
+            },
+            Statement {
+                row_payout_asset: [0x01; 20],
+                ..native_sample()
+            },
+            Statement {
+                row_payout_amount: [0x01; 32],
+                ..native_sample()
+            },
+            Statement {
+                witness_block_number: 1101,
+                ..native_sample()
+            },
+            Statement {
+                witness_block_hash: [0x67; 32],
+                ..native_sample()
+            },
         ];
         assert_eq!(mutations.len(), 14, "one case per context field");
 

@@ -27,13 +27,13 @@
 //! so a cost regression is visible in the diff.
 
 pub mod bytes;
+pub mod commitment;
+pub mod header;
+pub mod keccak;
 pub mod mpt;
 pub mod receipt;
 pub mod rlp;
 pub mod statement;
-pub mod commitment;
-pub mod header;
-pub mod keccak;
 
 /// Compiled bounds from spec section 12.9.
 ///

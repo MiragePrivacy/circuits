@@ -57,8 +57,7 @@ struct FixtureIntent {
 }
 
 fn dataset_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../test/vectors/mainnet.json")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../test/vectors/mainnet.json")
 }
 
 fn load() -> Option<Dataset> {
@@ -131,7 +130,10 @@ fn witness(f: &Fixture) -> Witness {
 fn bounds(d: &Dataset) -> Bounds {
     let b = Bounds::default();
     let max = |f: &dyn Fn(&Fixture) -> usize| d.fixtures.iter().map(f).max().unwrap_or(0);
-    assert!(max(&|f| f.depth) <= b.depth, "a fixture is deeper than the bound");
+    assert!(
+        max(&|f| f.depth) <= b.depth,
+        "a fixture is deeper than the bound"
+    );
     assert!(
         max(&|f| f.max_node_bytes) <= b.node_bytes,
         "a fixture node exceeds the bound"
@@ -210,8 +212,7 @@ fn dataset_is_varied() {
         .iter()
         .map(|f| f.intent.settlement_token.as_str())
         .collect();
-    let types: std::collections::BTreeSet<u8> =
-        d.fixtures.iter().map(|f| f.receipt_type).collect();
+    let types: std::collections::BTreeSet<u8> = d.fixtures.iter().map(|f| f.receipt_type).collect();
     let blocks: std::collections::BTreeSet<u64> =
         d.fixtures.iter().map(|f| f.block_number).collect();
 
@@ -236,8 +237,11 @@ fn commitments_are_distinct() {
     let Some(d) = load() else {
         return;
     };
-    let set: std::collections::BTreeSet<&str> =
-        d.fixtures.iter().map(|f| f.intent.commitment.as_str()).collect();
+    let set: std::collections::BTreeSet<&str> = d
+        .fixtures
+        .iter()
+        .map(|f| f.intent.commitment.as_str())
+        .collect();
     assert_eq!(
         set.len(),
         d.fixtures.len(),

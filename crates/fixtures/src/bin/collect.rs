@@ -38,13 +38,17 @@ const RPC: &str = "https://eth.drpc.org";
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let count = arg(&args, "--count").and_then(|v| v.parse().ok()).unwrap_or(100usize);
+    let count = arg(&args, "--count")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(100usize);
     let out = arg(&args, "--out").unwrap_or_else(|| "test/vectors/mainnet.json".into());
     let rpc_url = arg(&args, "--rpc").unwrap_or_else(|| RPC.into());
     // A prime stride spreads sampling rather than clustering in one period of
     // activity. Kept small because free endpoints time out on blocks far from
     // the tip; raise it against an archive node.
-    let stride: u64 = arg(&args, "--stride").and_then(|v| v.parse().ok()).unwrap_or(13);
+    let stride: u64 = arg(&args, "--stride")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(13);
 
     let latest = match rpc(&rpc_url, "eth_blockNumber", vec![]) {
         Ok(v) => u64::from_str_radix(v.as_str().unwrap_or("0x0").trim_start_matches("0x"), 16)
@@ -68,7 +72,11 @@ fn main() {
         let want = (count - fixtures.len()).min(3);
         match collect_block(&rpc_url, block, want) {
             Ok(got) if !got.is_empty() => {
-                eprintln!("  block {block}: +{} (total {})", got.len(), fixtures.len() + got.len());
+                eprintln!(
+                    "  block {block}: +{} (total {})",
+                    got.len(),
+                    fixtures.len() + got.len()
+                );
                 fixtures.extend(got);
             }
             Ok(_) => {}
@@ -97,8 +105,14 @@ fn main() {
     if let Some(s) = dataset.shape() {
         eprintln!("  depth         {} to {}", s.depth.0, s.depth.1);
         eprintln!("  node bytes    {} to {}", s.node_bytes.0, s.node_bytes.1);
-        eprintln!("  receipt bytes {} to {}", s.receipt_bytes.0, s.receipt_bytes.1);
-        eprintln!("  header bytes  {} to {}", s.header_bytes.0, s.header_bytes.1);
+        eprintln!(
+            "  receipt bytes {} to {}",
+            s.receipt_bytes.0, s.receipt_bytes.1
+        );
+        eprintln!(
+            "  header bytes  {} to {}",
+            s.header_bytes.0, s.header_bytes.1
+        );
         eprintln!("  receipt types {:?}", s.types);
         eprintln!("\nagainst the compiled bounds (node 544, key 4, receipt 1024, depth 4):");
         report("depth", s.depth.1, 4);
@@ -114,7 +128,9 @@ fn report(name: &str, observed: usize, bound: usize) {
 }
 
 fn arg(args: &[String], name: &str) -> Option<String> {
-    args.iter().position(|a| a == name).and_then(|i| args.get(i + 1).cloned())
+    args.iter()
+        .position(|a| a == name)
+        .and_then(|i| args.get(i + 1).cloned())
 }
 
 fn rpc(url: &str, method: &str, params: Vec<Value>) -> Result<Value, String> {
@@ -144,10 +160,13 @@ fn rpc(url: &str, method: &str, params: Vec<Value>) -> Result<Value, String> {
     Err(format!("{method} failed: {last}"))
 }
 
-
 fn collect_block(url: &str, number: u64, want: usize) -> Result<Vec<Fixture>, String> {
     let tag = Value::String(format!("0x{number:x}"));
-    let block = rpc(url, "eth_getBlockByNumber", vec![tag.clone(), Value::Bool(false)])?;
+    let block = rpc(
+        url,
+        "eth_getBlockByNumber",
+        vec![tag.clone(), Value::Bool(false)],
+    )?;
     let receipts = rpc(url, "eth_getBlockReceipts", vec![tag])?;
     let receipts = receipts.as_array().ok_or("receipts not an array")?;
     if receipts.is_empty() {

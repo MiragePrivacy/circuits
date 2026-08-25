@@ -76,7 +76,10 @@ pub fn intent_cases() -> Vec<(&'static str, &'static str, Intent)> {
         (
             "erc20_row_max_index",
             "Row index 31, the largest valid index in a 32-row batch",
-            Intent { row_index: 31, ..base.clone() },
+            Intent {
+                row_index: 31,
+                ..base.clone()
+            },
         ),
         (
             "native_row",
@@ -114,12 +117,18 @@ pub fn intent_cases() -> Vec<(&'static str, &'static str, Intent)> {
         (
             "amount_max",
             "settlementAmount = 2^256 - 1, both limbs saturated",
-            Intent { settlement_amount: [0xff; 32], ..base.clone() },
+            Intent {
+                settlement_amount: [0xff; 32],
+                ..base.clone()
+            },
         ),
         (
             "chain_id_large",
             "chainId near 2^64 - 1, the widest value the circuit accepts",
-            Intent { chain_id: u64::MAX, ..base.clone() },
+            Intent {
+                chain_id: u64::MAX,
+                ..base.clone()
+            },
         ),
     ]
 }
@@ -153,12 +162,18 @@ pub fn statement_cases(commitment: crate::Bytes32) -> Vec<(&'static str, &'stati
         (
             "native_payout_attempt_two",
             "Same row, second attempt: digest must differ from attempt one",
-            Statement { bond_attempt: 2, ..base.clone() },
+            Statement {
+                bond_attempt: 2,
+                ..base.clone()
+            },
         ),
         (
             "erc20_payout",
             "ERC-20 payout asset, exercising the asset field",
-            Statement { row_payout_asset: fill(0x90), ..base.clone() },
+            Statement {
+                row_payout_asset: fill(0x90),
+                ..base.clone()
+            },
         ),
         (
             "block_numbers_wide",

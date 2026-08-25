@@ -68,7 +68,8 @@ pub fn decode_branch<F: PrimeField>(
 ) -> Result<Branch<F>, SynthesisError> {
     // The outer list header, decoded generally: its length varies with fill.
     let list = Cursor::decode_item(node, &zero_at(node)?, active)?;
-    list.is_list.conditional_enforce_equal(&Boolean::TRUE, active)?;
+    list.is_list
+        .conditional_enforce_equal(&Boolean::TRUE, active)?;
     // The list must span the whole node, or bytes hide outside it.
     list.end().conditional_enforce_equal(node_len, active)?;
 
@@ -92,11 +93,8 @@ pub fn decode_branch<F: PrimeField>(
         occupied.push(is_hash.clone());
 
         // 1 byte for empty, 33 for a hash reference.
-        let step = FpVar::conditionally_select(
-            &is_hash,
-            &FpVar::constant(F::from(33u64)),
-            &FpVar::one(),
-        )?;
+        let step =
+            FpVar::conditionally_select(&is_hash, &FpVar::constant(F::from(33u64)), &FpVar::one())?;
         cursor += step;
     }
 
@@ -217,7 +215,8 @@ pub fn is_branch<F: PrimeField>(
     // The reliable discriminator is the item count, so decode two items and
     // check whether they close the list.
     let list = Cursor::decode_item(node, &zero_at(node)?, active)?;
-    list.is_list.conditional_enforce_equal(&Boolean::TRUE, active)?;
+    list.is_list
+        .conditional_enforce_equal(&Boolean::TRUE, active)?;
     list.end().conditional_enforce_equal(node_len, active)?;
 
     let first = Cursor::decode_item(node, &list.offset, active)?;
@@ -261,18 +260,18 @@ mod tests {
         assert!(cs.is_satisfied().unwrap(), "rejected a valid sparse branch");
 
         for (i, occ) in b.occupied.iter().enumerate() {
-            assert_eq!(
-                occ.value().unwrap(),
-                i == 3,
-                "slot {i} occupancy"
-            );
+            assert_eq!(occ.value().unwrap(), i == 3, "slot {i} occupancy");
         }
 
         // Read only the child the key selects, which is the whole point.
         let nibble = FpVar::new_witness(cs.clone(), || Ok(Fr::from(3u64))).unwrap();
         let hash = branch_child_hash(&buf, &b, &nibble, &Boolean::TRUE).unwrap();
         let got: Vec<u8> = hash.iter().map(|x| x.value().unwrap()).collect();
-        assert_eq!(got, mirage_encoding::keccak256(&leaf).to_vec(), "slot 3 hash");
+        assert_eq!(
+            got,
+            mirage_encoding::keccak256(&leaf).to_vec(),
+            "slot 3 hash"
+        );
         assert!(cs.is_satisfied().unwrap());
     }
 
@@ -438,14 +437,26 @@ mod tests {
     fn distinguishes_branch_from_short() {
         let leaf = leaf_node(&[5, 7, 1], &[0xaa; 40]);
         let (cs1, buf1, len1) = alloc(&leaf);
-        assert!(!is_branch(&buf1, &len1, &Boolean::TRUE).unwrap().value().unwrap(), "leaf");
+        assert!(
+            !is_branch(&buf1, &len1, &Boolean::TRUE)
+                .unwrap()
+                .value()
+                .unwrap(),
+            "leaf"
+        );
         assert!(cs1.is_satisfied().unwrap());
 
         let mut children: [Option<Vec<u8>>; 16] = Default::default();
         children[3] = Some(leaf);
         let node = branch_node(children, None);
         let (cs2, buf2, len2) = alloc(&node);
-        assert!(is_branch(&buf2, &len2, &Boolean::TRUE).unwrap().value().unwrap(), "branch");
+        assert!(
+            is_branch(&buf2, &len2, &Boolean::TRUE)
+                .unwrap()
+                .value()
+                .unwrap(),
+            "branch"
+        );
         assert!(cs2.is_satisfied().unwrap());
     }
 
@@ -469,13 +480,19 @@ mod tests {
 
         println!("branch layout ({BOUND} B buffer):        {layout} constraints");
         println!("one selected child hash read:           {read} constraints");
-        println!("total per traversal level:              {} constraints", layout + read);
+        println!(
+            "total per traversal level:              {} constraints",
+            layout + read
+        );
 
         // For comparison: a general 17-item RLP list decode over the same node.
         let (cs2, buf2, _) = alloc(&node);
         let z = zero_at(&buf2).unwrap();
         let before3 = cs2.num_constraints();
         let _ = Cursor::decode_list(&buf2, &z, 17, &Boolean::TRUE).unwrap();
-        println!("general decode_list(17):                {} constraints", cs2.num_constraints() - before3);
+        println!(
+            "general decode_list(17):                {} constraints",
+            cs2.num_constraints() - before3
+        );
     }
 }

@@ -534,11 +534,7 @@ pub mod fixture {
 
         let log = enc_list(&[
             enc_str(&TOKEN),
-            enc_list(&[
-                enc_str(&topic0),
-                enc_str(&from_topic),
-                enc_str(&to_topic),
-            ]),
+            enc_list(&[enc_str(&topic0), enc_str(&from_topic), enc_str(&to_topic)]),
             enc_str(&amount),
         ]);
 
@@ -554,10 +550,7 @@ pub mod fixture {
         // Trie: root branch, leaf under the key's first nibble.
         let key = vec![0x35, 0x71];
         let nibbles = to_nibbles(&key);
-        let leaf = enc_list(&[
-            enc_str(&hex_prefix(&nibbles[1..], true)),
-            enc_str(&receipt),
-        ]);
+        let leaf = enc_list(&[enc_str(&hex_prefix(&nibbles[1..], true)), enc_str(&receipt)]);
 
         let mut children: Vec<Vec<u8>> = (0..16).map(|_| enc_str(&[])).collect();
         children[nibbles[0] as usize] = enc_str(&keccak(&leaf));
@@ -652,27 +645,27 @@ pub mod fixture {
     /// A 21-field post-Prague header carrying the given receipts root.
     fn header_with_receipts_root(receipts_root: &[u8; 32], number: u64) -> Vec<u8> {
         enc_list(&[
-            enc_str(&[0x01; 32]),          // parentHash
-            enc_str(&[0x02; 32]),          // ommersHash
-            enc_str(&[0x03; 20]),          // beneficiary
-            enc_str(&[0x04; 32]),          // stateRoot
-            enc_str(&[0x05; 32]),          // transactionsRoot
-            enc_str(receipts_root),        // receiptsRoot
-            enc_str(&[0u8; 256]),          // logsBloom
-            enc_str(&[]),                  // difficulty
+            enc_str(&[0x01; 32]),                  // parentHash
+            enc_str(&[0x02; 32]),                  // ommersHash
+            enc_str(&[0x03; 20]),                  // beneficiary
+            enc_str(&[0x04; 32]),                  // stateRoot
+            enc_str(&[0x05; 32]),                  // transactionsRoot
+            enc_str(receipts_root),                // receiptsRoot
+            enc_str(&[0u8; 256]),                  // logsBloom
+            enc_str(&[]),                          // difficulty
             enc_str(&trim(&number.to_be_bytes())), // number
             enc_str(&[0x01, 0xc9, 0xc3, 0x80]),    // gasLimit
-            enc_str(&[0x52, 0x08]),        // gasUsed
+            enc_str(&[0x52, 0x08]),                // gasUsed
             enc_str(&[0x66, 0x00, 0x00, 0x00]),    // timestamp
-            enc_str(&[]),                  // extraData
-            enc_str(&[0x06; 32]),          // prevRandao
-            enc_str(&[0u8; 8]),            // nonce
-            enc_str(&[0x07]),              // baseFeePerGas
-            enc_str(&[0x08; 32]),          // withdrawalsRoot
-            enc_str(&[]),                  // blobGasUsed
-            enc_str(&[]),                  // excessBlobGas
-            enc_str(&[0x09; 32]),          // parentBeaconBlockRoot
-            enc_str(&[0x0a; 32]),          // requestsHash
+            enc_str(&[]),                          // extraData
+            enc_str(&[0x06; 32]),                  // prevRandao
+            enc_str(&[0u8; 8]),                    // nonce
+            enc_str(&[0x07]),                      // baseFeePerGas
+            enc_str(&[0x08; 32]),                  // withdrawalsRoot
+            enc_str(&[]),                          // blobGasUsed
+            enc_str(&[]),                          // excessBlobGas
+            enc_str(&[0x09; 32]),                  // parentBeaconBlockRoot
+            enc_str(&[0x0a; 32]),                  // requestsHash
         ])
     }
 }
