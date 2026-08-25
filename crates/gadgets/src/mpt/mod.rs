@@ -38,11 +38,11 @@
 
 #[cfg(test)]
 pub mod harness;
+pub mod node;
 #[cfg(test)]
 pub mod null;
 pub mod path;
 pub mod traverse;
-pub mod node;
 
 #[cfg(test)]
 mod tests;

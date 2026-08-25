@@ -124,8 +124,9 @@ pub fn keccak_f1600<F: PrimeField>(mut st: State<F>) -> Result<State<F>, Synthes
                 for b in 0..64 {
                     anded.push(not_next[b].clone() & &row[(j + 2) % 5][b]);
                 }
-                let anded: [Boolean<F>; 64] =
-                    anded.try_into().map_err(|_| SynthesisError::Unsatisfiable)?;
+                let anded: [Boolean<F>; 64] = anded
+                    .try_into()
+                    .map_err(|_| SynthesisError::Unsatisfiable)?;
                 st[(i * 5) + j] = xor_lane(&row[j], &anded)?;
             }
         }
@@ -181,7 +182,10 @@ mod tests {
         }
     }
 
-    fn alloc_state(cs: ark_relations::gr1cs::ConstraintSystemRef<Fr>, lanes: &[u64; 25]) -> State<Fr> {
+    fn alloc_state(
+        cs: ark_relations::gr1cs::ConstraintSystemRef<Fr>,
+        lanes: &[u64; 25],
+    ) -> State<Fr> {
         core::array::from_fn(|i| {
             core::array::from_fn(|b| {
                 Boolean::new_witness(cs.clone(), || Ok((lanes[i] >> b) & 1 == 1)).unwrap()
@@ -218,7 +222,9 @@ mod tests {
     fn permutation_matches_native_on_patterned_state() {
         let cs = ConstraintSystem::<Fr>::new_ref();
         let lanes: [u64; 25] = core::array::from_fn(|i| {
-            (i as u64).wrapping_mul(0x0123_4567_89ab_cdef).rotate_left(i as u32)
+            (i as u64)
+                .wrapping_mul(0x0123_4567_89ab_cdef)
+                .rotate_left(i as u32)
         });
         let out = keccak_f1600(alloc_state(cs.clone(), &lanes)).unwrap();
 

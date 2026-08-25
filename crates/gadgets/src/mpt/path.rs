@@ -21,8 +21,8 @@ use ark_r1cs_std::eq::EqGadget;
 use ark_r1cs_std::fields::fp::FpVar;
 use ark_r1cs_std::fields::FieldVar;
 use ark_r1cs_std::select::CondSelectGadget;
-use ark_r1cs_std::GR1CSVar;
 use ark_r1cs_std::uint8::UInt8;
+use ark_r1cs_std::GR1CSVar;
 use ark_relations::gr1cs::SynthesisError;
 
 use crate::bytes::{one_hot, select_byte_with};
@@ -158,10 +158,26 @@ mod tests {
 
     #[test]
     fn flags_match_the_yellow_paper() {
-        assert_eq!(flags_of(hex_prefix(&[], false)[0]), (false, false), "even extension");
-        assert_eq!(flags_of(hex_prefix(&[0xa], false)[0]), (false, true), "odd extension");
-        assert_eq!(flags_of(hex_prefix(&[], true)[0]), (true, false), "even leaf");
-        assert_eq!(flags_of(hex_prefix(&[0xa], true)[0]), (true, true), "odd leaf");
+        assert_eq!(
+            flags_of(hex_prefix(&[], false)[0]),
+            (false, false),
+            "even extension"
+        );
+        assert_eq!(
+            flags_of(hex_prefix(&[0xa], false)[0]),
+            (false, true),
+            "odd extension"
+        );
+        assert_eq!(
+            flags_of(hex_prefix(&[], true)[0]),
+            (true, false),
+            "even leaf"
+        );
+        assert_eq!(
+            flags_of(hex_prefix(&[0xa], true)[0]),
+            (true, true),
+            "odd leaf"
+        );
     }
 
     #[test]

@@ -23,7 +23,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .iter()
             .map(|(name, description, intent)| {
                 let v = IntentVector::from(intent);
-                Case { name, description, input: v.input, expected: v.expected }
+                Case {
+                    name,
+                    description,
+                    input: v.input,
+                    expected: v.expected,
+                }
             })
             .collect(),
     };
@@ -42,7 +47,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .iter()
             .map(|(name, description, statement)| {
                 let v = StatementVector::from(statement);
-                Case { name, description, input: v.input, expected: v.expected }
+                Case {
+                    name,
+                    description,
+                    input: v.input,
+                    expected: v.expected,
+                }
             })
             .collect(),
     };

@@ -32,11 +32,11 @@ use ark_r1cs_std::alloc::AllocVar;
 use ark_r1cs_std::boolean::Boolean;
 use ark_r1cs_std::convert::ToBitsGadget;
 use ark_r1cs_std::eq::EqGadget;
-use ark_r1cs_std::GR1CSVar;
 use ark_r1cs_std::fields::fp::FpVar;
 use ark_r1cs_std::fields::FieldVar;
 use ark_r1cs_std::select::CondSelectGadget;
 use ark_r1cs_std::uint8::UInt8;
+use ark_r1cs_std::GR1CSVar;
 use ark_relations::gr1cs::{ConstraintSystemRef, SynthesisError};
 
 /// `sel[i] = 1` for `i < len`, else 0. Also enforces `len <= n`.
@@ -127,10 +127,7 @@ pub fn assert_zero_tail<F: PrimeField>(
 /// Proving those three facts is equivalent to proving each `out[i] = (idx ==
 /// i)` individually, at a fraction of the cost. Reuse the vector across every
 /// read against the same index.
-pub fn one_hot<F: PrimeField>(
-    idx: &FpVar<F>,
-    n: usize,
-) -> Result<Vec<Boolean<F>>, SynthesisError> {
+pub fn one_hot<F: PrimeField>(idx: &FpVar<F>, n: usize) -> Result<Vec<Boolean<F>>, SynthesisError> {
     let cs = idx.cs();
     let idx_val = idx.value().ok();
 
@@ -428,7 +425,10 @@ mod tests {
     fn prefix_mask_rejects_len_past_the_bound() {
         let cs = ConstraintSystem::<Fr>::new_ref();
         let _ = prefix_mask(&fp(cs.clone(), 9), 8, &Boolean::TRUE).unwrap();
-        assert!(!cs.is_satisfied().unwrap(), "len 9 accepted for an 8-byte buffer");
+        assert!(
+            !cs.is_satisfied().unwrap(),
+            "len 9 accepted for an 8-byte buffer"
+        );
     }
 
     #[test]
@@ -544,7 +544,10 @@ mod tests {
         let shared = cs_b.num_constraints() - before_b;
 
         println!("reading {l} bytes from {n}: naive {naive}, shared {shared}");
-        assert!(shared < naive, "sharing did not reduce cost: {shared} vs {naive}");
+        assert!(
+            shared < naive,
+            "sharing did not reduce cost: {shared} vs {naive}"
+        );
     }
 
     #[test]
@@ -555,7 +558,10 @@ mod tests {
             let idx = fp(cs.clone(), 0);
             let before = cs.num_constraints();
             let _ = select_byte(&buf, &idx).unwrap();
-            println!("select_byte over {n} bytes: {} constraints", cs.num_constraints() - before);
+            println!(
+                "select_byte over {n} bytes: {} constraints",
+                cs.num_constraints() - before
+            );
         }
     }
 }

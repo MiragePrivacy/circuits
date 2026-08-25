@@ -75,7 +75,8 @@ pub fn parse<F: PrimeField>(
 
     // The list must span the whole header: no trailing bytes.
     let list = Cursor::decode_item(header, &zero, active)?;
-    list.is_list.conditional_enforce_equal(&Boolean::TRUE, active)?;
+    list.is_list
+        .conditional_enforce_equal(&Boolean::TRUE, active)?;
     list.end().conditional_enforce_equal(header_len, active)?;
 
     // The three 32-byte hash fields this build reads.
@@ -232,7 +233,11 @@ mod tests {
         for n in [0u64, 1, 255, 256, 21_000_000, u32::MAX as u64] {
             let (ok, h) = run(&header_fixture(&[0xcd; 32], n));
             assert!(ok, "rejected header with number {n}");
-            assert_eq!(h.unwrap().number.value().unwrap(), Fr::from(n), "number {n}");
+            assert_eq!(
+                h.unwrap().number.value().unwrap(),
+                Fr::from(n),
+                "number {n}"
+            );
         }
     }
 
@@ -279,7 +284,10 @@ mod tests {
                 fields.push(enc_str(&[0x11; 32]));
             }
         }
-        assert!(!run(&enc_list(&fields)).0, "accepted a 16-byte receiptsRoot");
+        assert!(
+            !run(&enc_list(&fields)).0,
+            "accepted a 16-byte receiptsRoot"
+        );
     }
 
     /// **Forgery: trailing bytes after the header list.**

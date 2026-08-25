@@ -85,7 +85,6 @@ fn render(vk: &VerifyingKey<Bn254>) -> String {
     .expect("render template")
 }
 
-
 fn proof_json(proof: &[[u8; 32]; 8], hi: u128, lo: u128, w: &mirage_relation::Witness) -> String {
     let p = proof.map(|w| format!("0x{}", hex::encode(w)));
     let s = &w.statement;
@@ -117,7 +116,16 @@ fn proof_json(proof: &[[u8; 32]; 8], hi: u128, lo: u128, w: &mirage_relation::Wi
   "note": "proof is [a.x, a.y, b.x1, b.x0, b.y1, b.y0, c.x, c.y]; the EVM pairing precompile takes G2 coordinates in that order, which is the reverse of arkworks' serialization. The statement block is what the escrow must reproduce from its own state for this proof to verify against it."
 }}
 "#,
-        p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], hi, lo,
+        p[0],
+        p[1],
+        p[2],
+        p[3],
+        p[4],
+        p[5],
+        p[6],
+        p[7],
+        hi,
+        lo,
         hx(&s.instance_domain),
         s.chain_id,
         hx(&s.escrow),

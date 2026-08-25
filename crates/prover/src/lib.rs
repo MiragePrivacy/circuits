@@ -27,6 +27,16 @@ pub struct Keys {
     pub vk: VerifyingKey<Bn254>,
 }
 
+/// The proving half of a [`Keys`], as [`save_proving_key`] writes it.
+///
+/// Aliased so a caller can name what [`Keys`] holds without depending on the
+/// arkworks crates directly, which would mean version-locking them against
+/// this crate's own.
+pub type SettlementProvingKey = ProvingKey<Bn254>;
+
+/// The verifying half of a [`Keys`], which the escrow embeds.
+pub type SettlementVerifyingKey = VerifyingKey<Bn254>;
+
 /// Runs the circuit-specific setup for `bounds`.
 ///
 /// Spec 18.2 requires a multiparty Phase 2 for production; this is the toy
@@ -35,8 +45,9 @@ pub struct Keys {
 /// rather than drawn from entropy so a rebuild reproduces the same key.
 pub fn setup(bounds: Bounds, seed: u64) -> Result<Keys, SettlementError> {
     let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(seed);
-    let (pk, vk) = Groth16::<Bn254>::circuit_specific_setup(ReceiptCircuit::setup(bounds), &mut rng)
-        .map_err(|e| SettlementError::Setup(e.to_string()))?;
+    let (pk, vk) =
+        Groth16::<Bn254>::circuit_specific_setup(ReceiptCircuit::setup(bounds), &mut rng)
+            .map_err(|e| SettlementError::Setup(e.to_string()))?;
     Ok(Keys { pk, vk })
 }
 
@@ -63,8 +74,9 @@ pub fn prove<R: ark_std::rand::RngCore + ark_std::rand::CryptoRng>(
     .map_err(|e| SettlementError::Prove(e.to_string()))?;
 
     let pvk = PreparedVerifyingKey::from(keys.vk.clone());
-    let ok = Groth16::<Bn254>::verify_with_processed_vk(&pvk, &[Fr::from(hi), Fr::from(lo)], &proof)
-        .map_err(|e| SettlementError::Verify(e.to_string()))?;
+    let ok =
+        Groth16::<Bn254>::verify_with_processed_vk(&pvk, &[Fr::from(hi), Fr::from(lo)], &proof)
+            .map_err(|e| SettlementError::Verify(e.to_string()))?;
     if !ok {
         return Err(SettlementError::SelfCheck);
     }
@@ -134,6 +146,9 @@ pub enum SettlementError {
     /// A proving key could not be read: wrong encoding, truncated, or not a
     /// key for this curve.
     KeyLoad(String),
+    /// A key could not be serialized. Only reachable through a writer error,
+    /// since the in-memory key is already well formed.
+    KeySave(String),
     Setup(String),
     Prove(String),
     Verify(String),
@@ -148,6 +163,7 @@ impl std::fmt::Display for SettlementError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::KeyLoad(e) => write!(f, "proving key could not be loaded: {e}"),
+            Self::KeySave(e) => write!(f, "key could not be serialized: {e}"),
             Self::Setup(e) => write!(f, "groth16 setup failed: {e}"),
             Self::Prove(e) => write!(f, "proving failed: {e}"),
             Self::Verify(e) => write!(f, "verification errored: {e}"),
@@ -218,6 +234,32 @@ pub fn load_proving_key(
         .map_err(|e| SettlementError::KeyLoad(e.to_string()))
 }
 
+/// Serializes a proving key, as [`load_proving_key`] reads it.
+///
+/// The inverse lives next to its counterpart so the two encodings cannot drift:
+/// the format is not self-describing, and a mismatch surfaces as a curve point
+/// check failure rather than a clean error. `compressed` must match what the
+/// reader will pass.
+///
+/// A caller that holds a key only because it generated one with [`setup`] is
+/// holding the unsound kind; writing it somewhere durable does not make it a
+/// ceremony key.
+pub fn save_proving_key(
+    pk: &ProvingKey<Bn254>,
+    compressed: bool,
+) -> Result<Vec<u8>, SettlementError> {
+    use ark_serialize::{CanonicalSerialize, Compress};
+    let mode = if compressed {
+        Compress::Yes
+    } else {
+        Compress::No
+    };
+    let mut bytes = Vec::with_capacity(pk.serialized_size(mode));
+    pk.serialize_with_mode(&mut bytes, mode)
+        .map_err(|e| SettlementError::KeySave(e.to_string()))?;
+    Ok(bytes)
+}
+
 /// The verifying key implied by a proving key.
 ///
 /// A node holds only the proving half, but the escrow embeds the verifying
@@ -226,6 +268,21 @@ pub fn load_proving_key(
 /// rejected proof.
 pub fn verifying_key_of(pk: &ProvingKey<Bn254>) -> VerifyingKey<Bn254> {
     pk.vk.clone()
+}
+
+/// Serializes a verifying key to its canonical uncompressed bytes.
+///
+/// Exposed so a caller can identify a setup without reproducing it: hashing
+/// these bytes yields a stable fingerprint that two keys share if and only if
+/// they came from the same setup. That is what lets a node accept a proving key
+/// from an untrusted source, by checking the verifying half it implies against
+/// a fingerprint the node already trusts.
+pub fn serialize_verifying_key(vk: &VerifyingKey<Bn254>) -> Result<Vec<u8>, SettlementError> {
+    use ark_serialize::{CanonicalSerialize, Compress};
+    let mut bytes = Vec::with_capacity(vk.serialized_size(Compress::No));
+    vk.serialize_with_mode(&mut bytes, Compress::No)
+        .map_err(|e| SettlementError::KeySave(e.to_string()))?;
+    Ok(bytes)
 }
 
 /// The verifying key's on-chain form: the constants the generated Solidity

@@ -22,7 +22,11 @@ fn proves_and_self_checks_a_genuine_settlement() {
     // The signals must be the ones the native encoder derives, since that is
     // what the escrow recomputes from its own storage.
     let (hi, lo) = mirage_relation::public_signals(&fixture::genuine());
-    assert_eq!(settlement.signals, [hi, lo], "signals disagree with the encoder");
+    assert_eq!(
+        settlement.signals,
+        [hi, lo],
+        "signals disagree with the encoder"
+    );
 
     // Every coordinate is a field element, so none may be all-zero: a zero
     // point would mean the conversion dropped a coordinate.
@@ -154,4 +158,47 @@ fn derived_constants_match_the_exported_verifier() {
             "IC point {i} disagrees with the exported verifier's {x}/{y}"
         );
     }
+}
+
+#[test]
+fn a_saved_proving_key_reloads_to_the_same_setup() {
+    let keys = keys();
+
+    // Uncompressed is what a caller caching locally uses: compression trades
+    // decompression work on every load for bytes that never leave the host.
+    let bytes = mirage_prover::save_proving_key(&keys.pk, false).expect("save");
+    let reloaded = mirage_prover::load_proving_key(&bytes, false).expect("load");
+
+    // The verifying half is what the escrow agrees with, so matching it is
+    // what makes a reloaded key usable rather than merely well formed.
+    assert_eq!(
+        mirage_prover::serialize_verifying_key(&mirage_prover::verifying_key_of(&reloaded))
+            .expect("serialize reloaded vk"),
+        mirage_prover::serialize_verifying_key(&keys.vk).expect("serialize vk"),
+        "a reloaded key implies a different verifying key"
+    );
+
+    // A proof from the reloaded key must still self-check, which the compressed
+    // round trip would also have to satisfy.
+    prove_seeded(
+        &Keys {
+            pk: reloaded,
+            vk: keys.vk.clone(),
+        },
+        Bounds::default(),
+        &fixture::genuine(),
+        0,
+    )
+    .expect("prove with the reloaded key");
+}
+
+#[test]
+fn reading_a_saved_key_with_the_wrong_encoding_fails() {
+    let bytes = mirage_prover::save_proving_key(&keys().pk, false).expect("save");
+    // The encodings are not self-describing, so this is the failure a caller
+    // gets for disagreeing about `compressed` -- not a clean length error.
+    assert!(
+        mirage_prover::load_proving_key(&bytes, true).is_err(),
+        "an uncompressed key read as compressed should not load"
+    );
 }

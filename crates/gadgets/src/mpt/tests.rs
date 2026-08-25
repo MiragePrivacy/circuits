@@ -87,18 +87,12 @@ fn keccak(b: &[u8]) -> [u8; 32] {
 
 /// A leaf node: hex-prefixed remaining path, then the value.
 pub fn leaf_node(path_nibbles: &[u8], value: &[u8]) -> Vec<u8> {
-    enc_list(&[
-        enc_str(&hex_prefix(path_nibbles, true)),
-        enc_str(value),
-    ])
+    enc_list(&[enc_str(&hex_prefix(path_nibbles, true)), enc_str(value)])
 }
 
 /// An extension node: hex-prefixed shared path, then a child reference.
 pub fn extension_node(path_nibbles: &[u8], child: &[u8]) -> Vec<u8> {
-    enc_list(&[
-        enc_str(&hex_prefix(path_nibbles, false)),
-        child_ref(child),
-    ])
+    enc_list(&[enc_str(&hex_prefix(path_nibbles, false)), child_ref(child)])
 }
 
 /// A branch node: 16 child slots plus a value slot.
@@ -131,14 +125,22 @@ pub fn child_ref(node: &[u8]) -> Vec<u8> {
 /// Returns (root hash, key, value, nodes root-first).
 pub fn simple_trie(n: u8, key: &[u8], value: &[u8]) -> ([u8; 32], Vec<u8>, Vec<u8>, Vec<Vec<u8>>) {
     let nibbles = to_nibbles(key);
-    assert_eq!(nibbles[0], n, "key's first nibble must select the branch slot");
+    assert_eq!(
+        nibbles[0], n,
+        "key's first nibble must select the branch slot"
+    );
 
     let leaf = leaf_node(&nibbles[1..], value);
     let mut children: [Option<Vec<u8>>; 16] = Default::default();
     children[n as usize] = Some(leaf.clone());
     let root = branch_node(children, None);
 
-    (keccak(&root), key.to_vec(), value.to_vec(), vec![root, leaf])
+    (
+        keccak(&root),
+        key.to_vec(),
+        value.to_vec(),
+        vec![root, leaf],
+    )
 }
 
 // ---------------------------------------------------------------- harness
@@ -150,7 +152,12 @@ fn genuine() -> NativeProof {
     let key = vec![0x35, 0x71];
     let value = b"a-receipt-standing-in-for-the-real-thing".to_vec();
     let (root, key, value, nodes) = simple_trie(0x3, &key, &value);
-    NativeProof { root, key, value, nodes }
+    NativeProof {
+        root,
+        key,
+        value,
+        nodes,
+    }
 }
 
 // ------------------------------------------------------- positive cases
@@ -174,7 +181,11 @@ pub fn fixtures_are_well_formed() {
     assert_eq!(hex_prefix(&[0xa], false), vec![0x1a], "odd extension");
     assert_eq!(hex_prefix(&[], true), vec![0x20], "even leaf");
     assert_eq!(hex_prefix(&[0xa], true), vec![0x3a], "odd leaf");
-    assert_eq!(hex_prefix(&[0x1, 0x2], true), vec![0x20, 0x12], "even leaf, two nibbles");
+    assert_eq!(
+        hex_prefix(&[0x1, 0x2], true),
+        vec![0x20, 0x12],
+        "even leaf, two nibbles"
+    );
 
     assert_eq!(to_nibbles(&[0x35, 0x71]), vec![3, 5, 7, 1]);
 
@@ -225,7 +236,10 @@ pub fn rejects_unlinked_node<V: MptVerifier<Fr>>() {
     // still references the original leaf's hash, so the link is broken.
     let nibbles = to_nibbles(&p.key);
     p.nodes[1] = leaf_node(&nibbles[1..], b"a-value-the-prover-would-prefer");
-    assert!(!verify::<V>(&p), "accepted a node not matching its parent reference");
+    assert!(
+        !verify::<V>(&p),
+        "accepted a node not matching its parent reference"
+    );
 }
 
 /// **Forgery: root hash not checked against the claimed root.**
@@ -258,7 +272,10 @@ pub fn rejects_wrong_nibble_child<V: MptVerifier<Fr>>() {
         value,
         nodes: vec![root, leaf],
     };
-    assert!(!verify::<V>(&p), "accepted a child from the wrong nibble slot");
+    assert!(
+        !verify::<V>(&p),
+        "accepted a child from the wrong nibble slot"
+    );
 }
 
 /// **Forgery: leaf path does not match the key remainder.**
@@ -281,7 +298,10 @@ pub fn rejects_leaf_path_mismatch<V: MptVerifier<Fr>>() {
         value,
         nodes: vec![root, leaf],
     };
-    assert!(!verify::<V>(&p), "accepted a leaf whose path differs from the key");
+    assert!(
+        !verify::<V>(&p),
+        "accepted a leaf whose path differs from the key"
+    );
 }
 
 /// **Forgery: extension path not compared.**
@@ -306,7 +326,10 @@ pub fn rejects_extension_path_mismatch<V: MptVerifier<Fr>>() {
         value,
         nodes: vec![root, ext, leaf],
     };
-    assert!(!verify::<V>(&p), "accepted an extension whose path differs from the key");
+    assert!(
+        !verify::<V>(&p),
+        "accepted an extension whose path differs from the key"
+    );
 }
 
 /// **Forgery: hex-prefix flags ignored.**
@@ -337,7 +360,10 @@ pub fn rejects_hex_prefix_flag_confusion<V: MptVerifier<Fr>>() {
         value,
         nodes: vec![root, leaf],
     };
-    assert!(!verify::<V>(&p), "accepted a node with a corrupted hex-prefix flag");
+    assert!(
+        !verify::<V>(&p),
+        "accepted a node with a corrupted hex-prefix flag"
+    );
 }
 
 /// **Forgery: an inactive depth slot treated as active.**
@@ -386,7 +412,10 @@ pub fn rejects_partial_key_consumption<V: MptVerifier<Fr>>() {
         value,
         nodes: vec![root, leaf],
     };
-    assert!(!verify::<V>(&p), "accepted a leaf that leaves key nibbles unconsumed");
+    assert!(
+        !verify::<V>(&p),
+        "accepted a leaf that leaves key nibbles unconsumed"
+    );
 }
 
 /// **Forgery: the value is present at a non-terminating level.**
@@ -445,8 +474,6 @@ pub fn run_suite<V: MptVerifier<Fr>>() {
     run_forgeries::<V>();
 }
 
-
-
 #[test]
 fn fixture_sanity() {
     fixtures_are_well_formed();
@@ -464,16 +491,28 @@ fn forgeries_defeat_the_null_verifier() {
     let cases: Vec<(&str, fn())> = vec![
         ("unlinked_node", || rejects_unlinked_node::<Null>()),
         ("wrong_root", || rejects_wrong_root::<Null>()),
-        ("wrong_nibble_child", || rejects_wrong_nibble_child::<Null>()),
-        ("leaf_path_mismatch", || rejects_leaf_path_mismatch::<Null>()),
-        ("extension_path_mismatch", || rejects_extension_path_mismatch::<Null>()),
-        ("hex_prefix_flag_confusion", || rejects_hex_prefix_flag_confusion::<Null>()),
-        ("active_slot_past_depth", || rejects_active_slot_past_depth::<Null>()),
+        ("wrong_nibble_child", || {
+            rejects_wrong_nibble_child::<Null>()
+        }),
+        ("leaf_path_mismatch", || {
+            rejects_leaf_path_mismatch::<Null>()
+        }),
+        ("extension_path_mismatch", || {
+            rejects_extension_path_mismatch::<Null>()
+        }),
+        ("hex_prefix_flag_confusion", || {
+            rejects_hex_prefix_flag_confusion::<Null>()
+        }),
+        ("active_slot_past_depth", || {
+            rejects_active_slot_past_depth::<Null>()
+        }),
         ("value_mismatch", || rejects_value_mismatch::<Null>()),
         ("value_at_non_terminating_level", || {
             rejects_value_at_a_non_terminating_level::<Null>()
         }),
-        ("partial_key_consumption", || rejects_partial_key_consumption::<Null>()),
+        ("partial_key_consumption", || {
+            rejects_partial_key_consumption::<Null>()
+        }),
     ];
 
     for (name, case) in cases {
@@ -488,5 +527,8 @@ fn forgeries_defeat_the_null_verifier() {
 
 /// Reports the cost of one verification, once an implementation exists.
 pub fn report_cost<V: MptVerifier<Fr>>(label: &str) {
-    println!("{label}: inclusion proof: {} constraints", cost::<V>(&genuine()));
+    println!(
+        "{label}: inclusion proof: {} constraints",
+        cost::<V>(&genuine())
+    );
 }

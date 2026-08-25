@@ -75,7 +75,8 @@ pub fn parse<F: PrimeField>(
     let is_list_header = bits[7].clone() & bits[6].clone();
 
     // Exactly one of the two, positively. Anything else fails closed.
-    (is_typed.clone() | is_list_header.clone()).conditional_enforce_equal(&Boolean::TRUE, active)?;
+    (is_typed.clone() | is_list_header.clone())
+        .conditional_enforce_equal(&Boolean::TRUE, active)?;
     (is_typed.clone() & is_list_header).conditional_enforce_equal(&Boolean::FALSE, active)?;
 
     // The payload begins after the prefix, if there is one.
@@ -85,7 +86,8 @@ pub fn parse<F: PrimeField>(
     // the tiling; a fifth item or a gap is rejected there.
     let items = Cursor::decode_list(receipt, &payload_at, 4, active)?;
     let list = Cursor::decode_item(receipt, &payload_at, active)?;
-    list.is_list.conditional_enforce_equal(&Boolean::TRUE, active)?;
+    list.is_list
+        .conditional_enforce_equal(&Boolean::TRUE, active)?;
 
     // The receipt must end where the payload ends: no trailing bytes.
     list.end().conditional_enforce_equal(receipt_len, active)?;
@@ -114,10 +116,7 @@ pub fn parse<F: PrimeField>(
     // cumulativeGasUsed below 2^64: at most 8 payload bytes. The RLP decoder
     // already rejects non-canonical encodings, so a short field cannot have
     // leading zeros.
-    let gas_ok = crate::bytes::le(
-        &cumulative_gas.payload_len,
-        &FpVar::constant(F::from(8u64)),
-    )?;
+    let gas_ok = crate::bytes::le(&cumulative_gas.payload_len, &FpVar::constant(F::from(8u64)))?;
     gas_ok.conditional_enforce_equal(&Boolean::TRUE, active)?;
 
     Ok(Payload {
