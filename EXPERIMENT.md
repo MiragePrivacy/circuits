@@ -1,21 +1,11 @@
-# Combined fixed-layout candidate
+# Combined candidate with constructed terminal leaf
 
-Baseline: `opt/baseline-profiling` (`6dea00a`).
+Parent: `opt/combined-candidate` (`902ad3e`), 8,396,989 constraints.
 
-This branch combines the independently measured fixed-layout receipt,
-448-byte structural receipt bound, and authenticated-header-prefix experiments.
-See the corresponding branches for their detailed soundness arguments and
-isolated measurements.
+This branch integrates a finite family of canonically constructed receipt-trie
+leaves into the combined receipt/header candidate. The circuit constructs the
+leaf from the already-bound key remainder and receipt, rather than accepting a
+raw terminal-node witness and generically parsing and copying its value.
 
-Measured additive result:
-
-| Optimization | Constraint delta |
-|---|---:|
-| Single-transfer receipt layout | -826,050 |
-| 448-byte receipt bound after fixed layout | -88,896 |
-| Authenticated header prefix | -1,114,749 |
-| Combined | -2,029,695 (-19.5%) |
-
-The full relation is 8,396,989 constraints. The receipt changes are high
-feasibility for the existing single-log policy. The header change requires
-explicit approval of the narrower authenticated-extraction responsibility.
+Measurements and final feasibility conclusions will be recorded after full
+relation integration.
