@@ -23,6 +23,6 @@ result is trusted.
 ## Feasibility
 
 High for the already-adopted direct-transfer/single-log policy. It deliberately
-does not support general multi-log receipts. Before production, add exhaustive
-tests over gas widths 1 through 9 and preserve the generic parser as the
-reference oracle for differential fuzzing.
+does not support general multi-log receipts. Exhaustive tests cover gas widths
+1 through 9 and every supported receipt envelope. Preserve the generic parser
+as the reference oracle for differential fuzzing.
