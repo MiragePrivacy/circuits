@@ -37,6 +37,7 @@
 //! present an unrelated node. The adversarial suite in [`tests`] names each.
 
 #[cfg(test)]
+pub mod constructed_leaf;
 pub mod harness;
 pub mod node;
 #[cfg(test)]
