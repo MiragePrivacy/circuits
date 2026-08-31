@@ -46,6 +46,24 @@ use mirage_gadgets::statement;
 pub const MEASUREMENT_SCOPE: &str =
     "commitment + header + MPT inclusion + ERC-20 relation + statement hash";
 
+/// Prints an attributable constraint delta when `RELATION_PROFILE` is set.
+///
+/// This deliberately observes only `num_constraints`: it does not allocate
+/// variables or otherwise change the circuit. Optimization branches use these
+/// stable stage names so their deltas can be compared against one baseline.
+fn profile<F: PrimeField>(
+    cs: &ConstraintSystemRef<F>,
+    stage: &str,
+    last: &mut usize,
+) {
+    if std::env::var_os("RELATION_PROFILE").is_none() {
+        return;
+    }
+    let now = cs.num_constraints();
+    eprintln!("{stage:>24}: {:>10}", now - *last);
+    *last = now;
+}
+
 /// Compiled bounds for this build.
 #[derive(Clone, Copy)]
 pub struct Bounds {
@@ -190,6 +208,7 @@ impl<F: PrimeField> ConstraintSynthesizer<F> for ReceiptCircuit {
     fn generate_constraints(self, cs: ConstraintSystemRef<F>) -> Result<(), SynthesisError> {
         let b = self.bounds;
         let w = self.w();
+        let mut mark = cs.num_constraints();
 
         // ---- public inputs ----
         //
@@ -236,6 +255,7 @@ impl<F: PrimeField> ConstraintSynthesizer<F> for ReceiptCircuit {
             amount: opening.settlement_amount.clone(),
         };
         let log_index = FpVar::new_witness(cs.clone(), || Ok(F::from(w.log_index as u64)))?;
+        profile(&cs, "allocation", &mut mark);
 
         // ---- the relation ----
         //
@@ -250,6 +270,7 @@ impl<F: PrimeField> ConstraintSynthesizer<F> for ReceiptCircuit {
         // is what turns "some Transfer happened" into "the Transfer this escrow
         // committed to happened".
         mirage_gadgets::commitment::open(&opening, &ctx.intent_commitment, &Boolean::TRUE)?;
+        profile(&cs, "intent commitment", &mut mark);
 
         // The commitment's deployment/request/row context must be the same
         // context whose statement hash the verifier checks. The commitment
@@ -259,11 +280,13 @@ impl<F: PrimeField> ConstraintSynthesizer<F> for ReceiptCircuit {
         enforce_bytes_equal(&opening.escrow, &ctx.escrow)?;
         enforce_bytes_equal(&opening.request_id, &ctx.request_id)?;
         enforce_bytes_equal(&opening.row_index, &ctx.row_index)?;
+        profile(&cs, "context equality", &mut mark);
         //
         // The header supplies the root rather than the caller. Accepting a
         // caller-supplied root would let a prover invent a trie containing
         // whatever it liked.
         let parsed = header::parse(&header_bytes, &header_len, &Boolean::TRUE)?;
+        profile(&cs, "header parse", &mut mark);
 
         // Authenticate both header identity fields carried by the statement.
         // Parsing a receiptsRoot is not useful unless the parsed header is the
@@ -273,6 +296,7 @@ impl<F: PrimeField> ConstraintSynthesizer<F> for ReceiptCircuit {
         for (got, want) in header_digest.iter().zip(ctx.witness_block_hash.iter()) {
             UInt8::from_bits_le(got).enforce_equal(want)?;
         }
+        profile(&cs, "header hash", &mut mark);
         let witness_number = fixed_be_value(&ctx.witness_block_number)?;
         parsed.number.enforce_equal(&witness_number)?;
 
@@ -282,6 +306,7 @@ impl<F: PrimeField> ConstraintSynthesizer<F> for ReceiptCircuit {
         let bond_deadline = fixed_be_value(&ctx.bond_deadline)?;
         lt_u64(&bond_start, &parsed.number)?.enforce_equal(&Boolean::TRUE)?;
         lt_u64(&bond_deadline, &parsed.number)?.enforce_equal(&Boolean::FALSE)?;
+        profile(&cs, "block/time checks", &mut mark);
 
         // The receipt is the MPT leaf's value, so inclusion binds the exact
         // bytes the log walk then inspects. Without that link the relation
@@ -295,6 +320,7 @@ impl<F: PrimeField> ConstraintSynthesizer<F> for ReceiptCircuit {
             &receipt_len,
             &nodes,
         )?;
+        profile(&cs, "MPT traversal", &mut mark);
         // The single-log variant: spec 20.3 requires production settlements be a
         // direct `transfer()` call, whose receipt carries exactly one event.
         // Skipping the walk to log `k` saves 16% of the receipt relation.
@@ -303,6 +329,7 @@ impl<F: PrimeField> ConstraintSynthesizer<F> for ReceiptCircuit {
         // which the enclave's pre-settlement token review must enforce rather
         // than the prover discovering it. See `receipt::log::sole_log`.
         Erc20SingleLog::verify(&receipt, &receipt_len, &log_index, &intent, &Boolean::TRUE)?;
+        profile(&cs, "receipt relation", &mut mark);
 
         // ---- statement hash ----
         //
@@ -311,6 +338,7 @@ impl<F: PrimeField> ConstraintSynthesizer<F> for ReceiptCircuit {
         // them down only shrinks the verifier.
         let signals = statement::compute(&ctx)?;
         statement::enforce(&signals, &public_hi, &public_lo, &Boolean::TRUE)?;
+        profile(&cs, "statement hash", &mut mark);
 
         Ok(())
     }
