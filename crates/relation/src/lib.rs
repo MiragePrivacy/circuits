@@ -90,15 +90,12 @@ impl Default for Bounds {
             // Path matching iterates `key.len() * 2` times over two buffers, so
             // this is a direct multiplier on that sub-step.
             key_bytes: 3,
-            // Measured across 100 mainnet direct-transfer receipts: 425 to 428
-            // bytes. 512 leaves 20% headroom over the observed maximum while
-            // costing roughly 760k fewer constraints than 1024.
-            //
-            // The headroom matters more than the saving: an over-tight bound
-            // makes a settlement unprovable at the executor's expense (spec
-            // 12.9). A token emitting a slightly larger Transfer, or one whose
-            // cumulativeGasUsed needs an extra byte, must still fit.
-            receipt_bytes: 512,
+            // A canonical status receipt containing exactly one ERC-20
+            // Transfer is at most 432 bytes, including a typed envelope and a
+            // nine-byte cumulativeGasUsed item. The production policy already
+            // rejects additional logs, so 448 retains 16 bytes above the
+            // structural maximum rather than padding to a general receipt.
+            receipt_bytes: 448,
             // Measured across 100 mainnet blocks: 632 to 655 bytes, a 23-byte
             // spread driven entirely by `extraData`.
             //
