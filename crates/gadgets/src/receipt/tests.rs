@@ -576,6 +576,17 @@ fn single_log_adversarial_suite() {
     run_forgeries::<R>();
 }
 
+/// The finite-layout implementation must preserve the complete single-log
+/// relation, including every adversarial rejection case.
+#[test]
+fn fixed_layout_adversarial_suite() {
+    use super::log::Erc20FixedLayout as R;
+    accepts_genuine_receipt::<R>();
+    accepts_every_supported_envelope::<R>();
+    accepts_any_sender::<R>();
+    run_forgeries::<R>();
+}
+
 /// The narrowing the variant trades for its saving: a receipt with a second
 /// event must be rejected, where the general relation accepts it.
 ///

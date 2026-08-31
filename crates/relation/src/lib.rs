@@ -30,7 +30,7 @@ use ark_relations::gr1cs::{ConstraintSynthesizer, ConstraintSystemRef, Synthesis
 use mirage_gadgets::bytes::alloc_bounded;
 use mirage_gadgets::header;
 use mirage_gadgets::mpt::{traverse::Traversal, MptVerifier, ProofNode};
-use mirage_gadgets::receipt::{log::Erc20SingleLog, Intent, ReceiptRelation};
+use mirage_gadgets::receipt::{log::Erc20FixedLayout, Intent, ReceiptRelation};
 use mirage_gadgets::statement;
 
 /// What this circuit does and does not include, so the measured numbers are
@@ -328,7 +328,7 @@ impl<F: PrimeField> ConstraintSynthesizer<F> for ReceiptCircuit {
         // The trade is that a receipt with any second event becomes unprovable,
         // which the enclave's pre-settlement token review must enforce rather
         // than the prover discovering it. See `receipt::log::sole_log`.
-        Erc20SingleLog::verify(&receipt, &receipt_len, &log_index, &intent, &Boolean::TRUE)?;
+        Erc20FixedLayout::verify(&receipt, &receipt_len, &log_index, &intent, &Boolean::TRUE)?;
         profile(&cs, "receipt relation", &mut mark);
 
         // ---- statement hash ----

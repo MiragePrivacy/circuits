@@ -28,6 +28,7 @@
 
 use ark_ff::PrimeField;
 use ark_r1cs_std::boolean::Boolean;
+use ark_r1cs_std::convert::ToBitsGadget;
 use ark_r1cs_std::eq::EqGadget;
 use ark_r1cs_std::fields::fp::FpVar;
 use ark_r1cs_std::fields::FieldVar;
@@ -211,6 +212,170 @@ pub struct Erc20;
 /// Identical to [`Erc20`] except that it requires exactly one log and skips the
 /// walk. See [`sole_log`] for what that trades away.
 pub struct Erc20SingleLog;
+
+/// The single-Transfer relation expressed as a finite set of fixed layouts.
+///
+/// Once a receipt is restricted to one canonical ERC-20 `Transfer`, only two
+/// values move any field boundary: whether an EIP-2718 type byte is present,
+/// and the encoded width of `cumulativeGasUsed`. Enumerating those 18 layouts
+/// turns every receipt access into a compile-time index. The candidate flags
+/// are derived from the receipt bytes and exact length, so the native witness
+/// builder supplies no trusted parse result.
+pub struct Erc20FixedLayout;
+
+impl<F: PrimeField> super::ReceiptRelation<F> for Erc20FixedLayout {
+    fn verify(
+        receipt: &[UInt8<F>],
+        receipt_len: &FpVar<F>,
+        log_index: &FpVar<F>,
+        intent: &Intent<F>,
+        active: &Boolean<F>,
+    ) -> Result<(), SynthesisError> {
+        // This relation is deliberately the same single-log narrowing as
+        // `Erc20SingleLog`.
+        log_index.conditional_enforce_equal(&FpVar::zero(), active)?;
+
+        // A typed envelope is one of exactly 0x01..0x04. Legacy starts with the
+        // payload's 0xf9 list prefix. All supported direct-transfer receipts
+        // have a two-byte outer payload length.
+        let mut type_ok = Boolean::FALSE;
+        for t in 1u8..=4 {
+            type_ok |= receipt[0].is_eq(&UInt8::constant(t))?;
+        }
+        let legacy_prefix = receipt[0].is_eq(&UInt8::constant(0xf9))?;
+        let typed_payload_prefix = receipt[1].is_eq(&UInt8::constant(0xf9))?;
+
+        let mut accepted = Boolean::FALSE;
+        for payload_at in 0usize..=1 {
+            for gas_total in 1usize..=9 {
+                // Outer list: three-byte header plus a body containing status
+                // (1), gas (gas_total), bloom (259), and logs (159).
+                let total = payload_at + 422 + gas_total;
+                let length_matches =
+                    receipt_len.is_eq(&FpVar::constant(F::from(total as u64)))?;
+                let envelope_matches = if payload_at == 0 {
+                    legacy_prefix.clone()
+                } else {
+                    type_ok.clone() & typed_payload_prefix.clone()
+                };
+                let candidate = length_matches & envelope_matches;
+                accepted |= candidate.clone();
+
+                check_fixed_layout(
+                    receipt,
+                    payload_at,
+                    gas_total,
+                    intent,
+                    &(active.clone() & candidate),
+                )?;
+            }
+        }
+
+        accepted.conditional_enforce_equal(&Boolean::TRUE, active)?;
+        Ok(())
+    }
+}
+
+fn check_fixed_layout<F: PrimeField>(
+    receipt: &[UInt8<F>],
+    payload_at: usize,
+    gas_total: usize,
+    intent: &Intent<F>,
+    active: &Boolean<F>,
+) -> Result<(), SynthesisError> {
+    // payload = [status, cumulativeGasUsed, logsBloom, [Transfer]]
+    assert!(receipt.len() >= payload_at + 431, "receipt bound too small");
+    let body_len = 419 + gas_total;
+    byte_eq(receipt, payload_at, 0xf9, active)?;
+    byte_eq(receipt, payload_at + 1, 0x01, active)?;
+    byte_eq(receipt, payload_at + 2, (body_len - 256) as u8, active)?;
+    byte_eq(receipt, payload_at + 3, 0x01, active)?; // successful status
+
+    let gas_at = payload_at + 4;
+    if gas_total == 1 {
+        // Empty (zero) or a bare byte below 0x80. 0x81 would be non-minimal.
+        let bits = receipt[gas_at].to_bits_le()?;
+        let empty = receipt[gas_at].is_eq(&UInt8::constant(0x80))?;
+        (!bits[7].clone() | empty).conditional_enforce_equal(&Boolean::TRUE, active)?;
+    } else {
+        byte_eq(receipt, gas_at, 0x80 + (gas_total - 1) as u8, active)?;
+        if gas_total == 2 {
+            // RLP must encode a one-byte value below 0x80 in bare form.
+            let bits = receipt[gas_at + 1].to_bits_le()?;
+            bits[7].conditional_enforce_equal(&Boolean::TRUE, active)?;
+        }
+    }
+
+    let bloom_at = gas_at + gas_total;
+    byte_eq(receipt, bloom_at, 0xb9, active)?;
+    byte_eq(receipt, bloom_at + 1, 0x01, active)?;
+    byte_eq(receipt, bloom_at + 2, 0x00, active)?;
+
+    let logs_at = bloom_at + 259;
+    byte_eq(receipt, logs_at, 0xf8, active)?;
+    byte_eq(receipt, logs_at + 1, 0x9d, active)?; // one 157-byte log
+
+    let log_at = logs_at + 2;
+    byte_eq(receipt, log_at, 0xf8, active)?;
+    byte_eq(receipt, log_at + 1, 0x9b, active)?; // 155-byte log body
+
+    let address_at = log_at + 2;
+    byte_eq(receipt, address_at, 0x94, active)?;
+    bytes_equal(&receipt[address_at + 1..address_at + 21], &intent.token, active)?;
+
+    let topics_at = address_at + 21;
+    byte_eq(receipt, topics_at, 0xf8, active)?;
+    byte_eq(receipt, topics_at + 1, 0x63, active)?;
+
+    let topic0_at = topics_at + 2;
+    byte_eq(receipt, topic0_at, 0xa0, active)?;
+    for (got, want) in receipt[topic0_at + 1..topic0_at + 33]
+        .iter()
+        .zip(TRANSFER_TOPIC0.iter())
+    {
+        got.conditional_enforce_equal(&UInt8::constant(*want), active)?;
+    }
+
+    let topic1_at = topic0_at + 33;
+    byte_eq(receipt, topic1_at, 0xa0, active)?; // sender intentionally free
+
+    let topic2_at = topic1_at + 33;
+    byte_eq(receipt, topic2_at, 0xa0, active)?;
+    for byte in &receipt[topic2_at + 1..topic2_at + 13] {
+        byte.conditional_enforce_equal(&UInt8::constant(0), active)?;
+    }
+    bytes_equal(
+        &receipt[topic2_at + 13..topic2_at + 33],
+        &intent.recipient,
+        active,
+    )?;
+
+    let data_at = topic2_at + 33;
+    byte_eq(receipt, data_at, 0xa0, active)?;
+    bytes_equal(&receipt[data_at + 1..data_at + 33], &intent.amount, active)?;
+    Ok(())
+}
+
+fn byte_eq<F: PrimeField>(
+    receipt: &[UInt8<F>],
+    at: usize,
+    want: u8,
+    active: &Boolean<F>,
+) -> Result<(), SynthesisError> {
+    receipt[at].conditional_enforce_equal(&UInt8::constant(want), active)
+}
+
+fn bytes_equal<F: PrimeField>(
+    got: &[UInt8<F>],
+    want: &[UInt8<F>],
+    active: &Boolean<F>,
+) -> Result<(), SynthesisError> {
+    assert_eq!(got.len(), want.len());
+    for (got, want) in got.iter().zip(want.iter()) {
+        got.conditional_enforce_equal(want, active)?;
+    }
+    Ok(())
+}
 
 impl<F: PrimeField> super::ReceiptRelation<F> for Erc20SingleLog {
     fn verify(
