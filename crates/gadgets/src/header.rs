@@ -310,6 +310,30 @@ mod tests {
     }
 
     #[test]
+    fn authenticated_prefix_matches_the_full_parser() {
+        let root = [0xab; 32];
+        let bytes = header_fixture(&root, 21_000_000);
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        let buf = alloc_bounded(cs.clone(), &bytes, BOUND).unwrap();
+        let len = FpVar::new_witness(cs.clone(), || Ok(Fr::from(bytes.len() as u64))).unwrap();
+        let h = parse_authenticated_prefix(&buf, &len, &Boolean::TRUE).unwrap();
+        assert_eq!(h.receipts_root.iter().map(|b| b.value().unwrap()).collect::<Vec<_>>(), root);
+        assert_eq!(h.number.value().unwrap(), Fr::from(21_000_000u64));
+        assert!(cs.is_satisfied().unwrap());
+    }
+
+    #[test]
+    fn authenticated_prefix_rejects_a_shifted_schema() {
+        let mut bytes = header_fixture(&[0xab; 32], 21_000_000);
+        bytes[156] = 0x9f; // receiptsRoot is no longer a 32-byte string.
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        let buf = alloc_bounded(cs.clone(), &bytes, BOUND).unwrap();
+        let len = FpVar::new_witness(cs.clone(), || Ok(Fr::from(bytes.len() as u64))).unwrap();
+        let _ = parse_authenticated_prefix(&buf, &len, &Boolean::TRUE).unwrap();
+        assert!(!cs.is_satisfied().unwrap());
+    }
+
+    #[test]
     fn reads_small_and_large_block_numbers() {
         for n in [0u64, 1, 255, 256, 21_000_000, u32::MAX as u64] {
             let (ok, h) = run(&header_fixture(&[0xcd; 32], n));
