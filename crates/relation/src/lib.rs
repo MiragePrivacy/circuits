@@ -285,7 +285,8 @@ impl<F: PrimeField> ConstraintSynthesizer<F> for ReceiptCircuit {
         // The header supplies the root rather than the caller. Accepting a
         // caller-supplied root would let a prover invent a trie containing
         // whatever it liked.
-        let parsed = header::parse(&header_bytes, &header_len, &Boolean::TRUE)?;
+        let parsed =
+            header::parse_authenticated_prefix(&header_bytes, &header_len, &Boolean::TRUE)?;
         profile(&cs, "header parse", &mut mark);
 
         // Authenticate both header identity fields carried by the statement.

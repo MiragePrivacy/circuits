@@ -1,28 +1,19 @@
-# Fixed-layout direct-transfer receipt experiment
+# Combined fixed-layout candidate
 
 Baseline: `opt/baseline-profiling` (`6dea00a`).
 
-## Result
+This branch combines the independently measured fixed-layout receipt and
+authenticated-header-prefix experiments. See the corresponding branches for
+their detailed soundness arguments and isolated measurements.
 
-| Metric | Baseline | This branch | Delta |
-|---|---:|---:|---:|
-| Receipt relation | 828,585 | 2,535 | -826,050 |
-| Full relation | 10,426,684 | 9,600,634 | -826,050 (-7.9%) |
+Expected additive result before measuring this branch:
 
-The existing single-log adversarial suite passes, and all 100 mainnet fixtures
-satisfy the full relation.
+| Optimization | Constraint delta |
+|---|---:|
+| Single-transfer receipt layout | -826,050 |
+| Authenticated header prefix | -1,114,749 |
+| Combined | -1,940,799 (-18.6%) |
 
-## Why it works
-
-With exactly one canonical `Transfer`, only the envelope byte and encoded width
-of `cumulativeGasUsed` move field boundaries. The circuit enumerates the 18
-possible layouts and reads every checked byte at a compile-time offset. Layout
-selectors are derived from the receipt bytes and exact length; no native parse
-result is trusted.
-
-## Feasibility
-
-High for the already-adopted direct-transfer/single-log policy. It deliberately
-does not support general multi-log receipts. Exhaustive tests cover gas widths
-1 through 9 and every supported receipt envelope. Preserve the generic parser
-as the reference oracle for differential fuzzing.
+The expected full relation size is 8,485,885 constraints. The receipt change is
+high feasibility for the existing single-log policy. The header change requires
+explicit approval of the narrower authenticated-extraction responsibility.
