@@ -39,3 +39,10 @@ High for the current relation's existing depth-four and three-byte-key policy.
 The witness API still carries a redundant raw terminal node which synthesis
 ignores; remove it in a cleanup pass before merging. Full fixture and proving
 tests remain final-candidate gates rather than iteration gates.
+
+The native sequential-trie profiler also exposes a pre-existing coverage
+limit: proof depth reaches 5 at 130 receipts, 6 at 273, and 7 near 1,022. The
+current depth-four circuit is therefore already a coverage tier, despite its
+three-byte key buffer. Conversely, a one-byte transaction-index key has a
+structural maximum of two branch ancestors and no extensions; that narrower
+tier is measured separately rather than silently folded into this branch.
