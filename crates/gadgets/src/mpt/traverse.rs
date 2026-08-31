@@ -290,7 +290,9 @@ impl<F: PrimeField> MptVerifier<F> for Traversal {
 }
 
 /// Eight boolean bits, least significant first, back into a `UInt8`.
-fn bits_to_byte<F: PrimeField>(bits: &[Boolean<F>; 8]) -> Result<UInt8<F>, SynthesisError> {
+pub(super) fn bits_to_byte<F: PrimeField>(
+    bits: &[Boolean<F>; 8],
+) -> Result<UInt8<F>, SynthesisError> {
     Ok(UInt8::from_bits_le(bits))
 }
 
@@ -318,7 +320,7 @@ fn cond_select_bytes<F: PrimeField>(
 ///
 /// Invariant 4. Compares up to a compiled maximum, gating each position on
 /// whether it is within the actual path length.
-fn assert_path_matches<F: PrimeField>(
+pub(super) fn assert_path_matches<F: PrimeField>(
     node: &[UInt8<F>],
     short: &super::node::ShortNode<F>,
     is_odd: &Boolean<F>,
