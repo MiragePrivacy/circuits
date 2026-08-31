@@ -29,7 +29,9 @@ use ark_relations::gr1cs::{ConstraintSynthesizer, ConstraintSystemRef, Synthesis
 
 use mirage_gadgets::bytes::alloc_bounded;
 use mirage_gadgets::header;
-use mirage_gadgets::mpt::{traverse::Traversal, MptVerifier, ProofNode};
+use mirage_gadgets::mpt::{
+    constructed_traverse::ConstructedLeafTraversal, MptVerifier, ProofNode,
+};
 use mirage_gadgets::receipt::{log::Erc20FixedLayout, Intent, ReceiptRelation};
 use mirage_gadgets::statement;
 
@@ -227,14 +229,27 @@ impl<F: PrimeField> ConstraintSynthesizer<F> for ReceiptCircuit {
         let receipt = alloc_bounded(cs.clone(), &w.receipt, b.receipt_bytes)?;
         let receipt_len = FpVar::new_witness(cs.clone(), || Ok(F::from(w.receipt.len() as u64)))?;
 
-        let mut nodes = Vec::with_capacity(b.depth);
-        for i in 0..b.depth {
-            let (bytes, len, active) = match w.nodes.get(i) {
+        // The terminal leaf is constructed from the key remainder and receipt,
+        // so only the at-most `depth - 1` ancestor nodes are witnesses.
+        let ancestor_count = w.nodes.len().saturating_sub(1);
+        let mut nodes = Vec::with_capacity(b.depth.saturating_sub(1));
+        for i in 0..b.depth.saturating_sub(1) {
+            // An active root is necessarily a branch: a root leaf is the
+            // zero-ancestor case constructed below. With three-byte RLP
+            // transaction-index keys, only first nibbles 0..=8 can occur, so
+            // at most nine 33-byte child references plus seven empty slots,
+            // an empty value and the three-byte list header fit in 308 bytes.
+            // Deeper branches can occupy all sixteen slots: 16*33 bytes of
+            // hash references, one empty value byte, and a three-byte list
+            // header are exactly 532 bytes. These are structural maxima, not
+            // sampled cutoffs.
+            let node_bound = if i == 0 { 308 } else { 532 };
+            let (bytes, len, active) = match w.nodes.get(i).filter(|_| i < ancestor_count) {
                 Some(n) => (n.clone(), n.len(), true),
                 None => (Vec::new(), 0, false),
             };
             nodes.push(ProofNode {
-                bytes: alloc_bounded(cs.clone(), &bytes, b.node_bytes)?,
+                bytes: alloc_bounded(cs.clone(), &bytes, node_bound)?,
                 len: FpVar::new_witness(cs.clone(), || Ok(F::from(len as u64)))?,
                 active: Boolean::new_witness(cs.clone(), || Ok(active))?,
             });
@@ -310,7 +325,7 @@ impl<F: PrimeField> ConstraintSynthesizer<F> for ReceiptCircuit {
         // bytes the log walk then inspects. Without that link the relation
         // would prove a Transfer in *some* receipt rather than one in this
         // block's trie.
-        Traversal::verify_inclusion(
+        ConstructedLeafTraversal::verify_inclusion(
             &parsed.receipts_root,
             &key,
             &key_len,
