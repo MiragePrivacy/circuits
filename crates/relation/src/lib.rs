@@ -77,10 +77,10 @@ pub struct Bounds {
 }
 
 impl Default for Bounds {
-    /// The bounds the optimization phase settled on: a 544-byte node is the
-    /// structural worst case for a receipt-trie branch, a receipt-trie key is
-    /// `rlp(transactionIndex)` at four bytes, and depth 4 covers a typical
-    /// block's receipt trie.
+    /// Universal tier for the current three-byte transaction-index-key policy.
+    /// Such a key has at most six nibbles. Every branch consumes one nibble and
+    /// every extension consumes at least one, so at most six ancestors plus
+    /// the constructed terminal leaf can occur: total depth seven.
     fn default() -> Self {
         Self {
             node_bytes: 544,
@@ -112,7 +112,7 @@ impl Default for Bounds {
             // already paid. Headroom here is cheap insurance against a field
             // this sample happened not to exercise.
             header_bytes: 704,
-            depth: 4,
+            depth: 7,
         }
     }
 }
@@ -833,6 +833,6 @@ mod tests {
             "unsatisfied: {:?}",
             cs.which_is_unsatisfied()
         );
-        println!("constraints: {}", cs.num_constraints());
+        assert_eq!(cs.num_constraints(), 8_095_727);
     }
 }
