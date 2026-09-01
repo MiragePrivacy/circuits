@@ -1,0 +1,28 @@
+[package]
+name = "mirage-keccacheck-arkworks"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+
+[dependencies]
+ark-bn254 = { version = "0.5", features = ["std"] }
+ark-ff = { version = "0.5", features = ["asm"] }
+ark-groth16 = { version = "0.5", features = ["parallel"] }
+ark-r1cs-std = { version = "0.5", features = ["std"] }
+ark-relations = { version = "0.5", features = ["std"] }
+ark-serialize = { version = "0.5", features = ["std"] }
+ark-snark = "0.5"
+ark-std = { version = "0.5", features = ["std"] }
+blake3 = "1.8"
+gkr = { git = "https://github.com/reilabs/keccacheck.git", rev = "15f00e3da5622f1c7155b02d1f9c00bd2416c282", default-features = false }
+keccak = "0.1.5"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+[profile.dev]
+opt-level = 1
+
