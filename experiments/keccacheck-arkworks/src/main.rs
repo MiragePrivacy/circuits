@@ -1,5 +1,5 @@
 use ark_bn254::Fr;
-use ark_relations::r1cs::ConstraintSystem;
+use ark_relations::gr1cs::ConstraintSystem;
 use mirage_keccacheck_arkworks::verifier::{make_witness, verify_witness_profile};
 use std::{env, process::ExitCode, time::Instant};
 

@@ -17,6 +17,7 @@
 //!
 //! Not wired: the delayed-witness ancestry chain (12.7), which is step 5.
 
+use ark_bn254::Fr;
 use ark_ff::PrimeField;
 use ark_r1cs_std::alloc::AllocVar;
 use ark_r1cs_std::boolean::Boolean;
@@ -29,9 +30,8 @@ use ark_relations::gr1cs::{ConstraintSynthesizer, ConstraintSystemRef, Synthesis
 
 use mirage_gadgets::bytes::alloc_bounded;
 use mirage_gadgets::header;
-use mirage_gadgets::mpt::{
-    constructed_traverse::ConstructedLeafTraversal, MptVerifier, ProofNode,
-};
+use mirage_gadgets::keccak::{DirectPermutation, PermutationBackend};
+use mirage_gadgets::mpt::{constructed_traverse::ConstructedLeafTraversal, ProofNode};
 use mirage_gadgets::receipt::{log::Erc20FixedLayout, Intent, ReceiptRelation};
 use mirage_gadgets::statement;
 
@@ -53,11 +53,7 @@ pub const MEASUREMENT_SCOPE: &str =
 /// This deliberately observes only `num_constraints`: it does not allocate
 /// variables or otherwise change the circuit. Optimization branches use these
 /// stable stage names so their deltas can be compared against one baseline.
-fn profile<F: PrimeField>(
-    cs: &ConstraintSystemRef<F>,
-    stage: &str,
-    last: &mut usize,
-) {
+fn profile<F: PrimeField>(cs: &ConstraintSystemRef<F>, stage: &str, last: &mut usize) {
     if std::env::var_os("RELATION_PROFILE").is_none() {
         return;
     }
@@ -205,156 +201,207 @@ impl ReceiptCircuit {
 
 impl<F: PrimeField> ConstraintSynthesizer<F> for ReceiptCircuit {
     fn generate_constraints(self, cs: ConstraintSystemRef<F>) -> Result<(), SynthesisError> {
-        let b = self.bounds;
-        let w = self.w();
-        let mut mark = cs.num_constraints();
+        generate_constraints_with_backend(self, cs, &mut DirectPermutation)
+    }
+}
 
-        // ---- public inputs ----
-        //
-        // Exactly two, per spec 10.1: the statement hash's 128-bit limbs. Each
-        // public input costs a scalar multiplication in the on-chain verifier
-        // and a G1 point in the embedded verification key, so collapsing the
-        // full context to two keeps the verifier fixed regardless of how many
-        // fields the relation binds.
-        let (want_hi, want_lo) = native_signals(&w.statement);
-        let public_hi = FpVar::new_input(cs.clone(), || Ok(F::from(want_hi)))?;
-        let public_lo = FpVar::new_input(cs.clone(), || Ok(F::from(want_lo)))?;
+/// Experimental relation using one deferred Keccacheck batch instead of 38
+/// directly arithmetized Keccak-f permutations.
+#[derive(Clone)]
+pub struct KeccacheckReceiptCircuit(pub ReceiptCircuit);
 
-        // ---- witness allocation ----
-        let header_bytes = alloc_bounded(cs.clone(), &w.header, b.header_bytes)?;
-        let header_len = FpVar::new_witness(cs.clone(), || Ok(F::from(w.header.len() as u64)))?;
-        let key = alloc_bounded(cs.clone(), &w.key, b.key_bytes)?;
-        let key_len = FpVar::new_witness(cs.clone(), || Ok(F::from(w.key.len() as u64)))?;
+impl KeccacheckReceiptCircuit {
+    pub fn setup(bounds: Bounds) -> Self {
+        Self(ReceiptCircuit::setup(bounds))
+    }
 
-        let receipt = alloc_bounded(cs.clone(), &w.receipt, b.receipt_bytes)?;
-        let receipt_len = FpVar::new_witness(cs.clone(), || Ok(F::from(w.receipt.len() as u64)))?;
+    pub fn prove(bounds: Bounds, witness: Witness) -> Self {
+        Self(ReceiptCircuit::prove(bounds, witness))
+    }
+}
 
-        // The terminal leaf is constructed from the key remainder and receipt,
-        // so only the at-most `depth - 1` ancestor nodes are witnesses.
-        let ancestor_count = w.nodes.len().saturating_sub(1);
-        let mut nodes = Vec::with_capacity(b.depth.saturating_sub(1));
-        for i in 0..b.depth.saturating_sub(1) {
-            // An active root is necessarily a branch: a root leaf is the
-            // zero-ancestor case constructed below. With three-byte RLP
-            // transaction-index keys, only first nibbles 0..=8 can occur, so
-            // at most nine 33-byte child references plus seven empty slots,
-            // an empty value and the three-byte list header fit in 308 bytes.
-            // Deeper branches can occupy all sixteen slots: 16*33 bytes of
-            // hash references, one empty value byte, and a three-byte list
-            // header are exactly 532 bytes. These are structural maxima, not
-            // sampled cutoffs.
-            let node_bound = if i == 0 { 308 } else { 532 };
-            let (bytes, len, active) = match w.nodes.get(i).filter(|_| i < ancestor_count) {
-                Some(n) => (n.clone(), n.len(), true),
-                None => (Vec::new(), 0, false),
-            };
-            nodes.push(ProofNode {
-                bytes: alloc_bounded(cs.clone(), &bytes, node_bound)?,
-                len: FpVar::new_witness(cs.clone(), || Ok(F::from(len as u64)))?,
-                active: Boolean::new_witness(cs.clone(), || Ok(active))?,
-            });
+impl ConstraintSynthesizer<Fr> for KeccacheckReceiptCircuit {
+    fn generate_constraints(self, cs: ConstraintSystemRef<Fr>) -> Result<(), SynthesisError> {
+        let mut batch = mirage_keccacheck_arkworks::batch::KeccacheckBatch::new(cs.clone());
+        generate_constraints_with_backend(self.0, cs.clone(), &mut batch)?;
+        let before = cs.num_constraints();
+        let result = batch.finish()?;
+        if std::env::var_os("RELATION_PROFILE").is_some() {
+            eprintln!(
+                "{:>24}: {:>10} ({} -> {} permutations)",
+                "Keccacheck verifier",
+                cs.num_constraints() - before,
+                result.recorded,
+                result.padded,
+            );
         }
-
-        // The opened commitment, whose token/recipient/amount become the intent
-        // the receipt relation checks. Opening it and then checking the log
-        // against different values would defeat the whole exercise, so the same
-        // allocations are used for both.
-        let opening = alloc_opening(cs.clone(), &w.intent)?;
-        let ctx = alloc_statement(cs.clone(), &w.statement)?;
-        let intent = Intent {
-            token: opening.settlement_token.clone(),
-            recipient: opening.recipient.clone(),
-            amount: opening.settlement_amount.clone(),
-        };
-        let log_index = FpVar::new_witness(cs.clone(), || Ok(F::from(w.log_index as u64)))?;
-        profile(&cs, "allocation", &mut mark);
-
-        // ---- the relation ----
-        //
-        // The chain of bindings is what makes this a proof rather than a
-        // satisfiability check:
-        //
-        //   commitment ->  token/recipient/amount
-        //   header     ->  receiptsRoot -> MPT inclusion -> receipt -> log
-        //
-        // The commitment is the escrow's stored value, carried into the
-        // statement hash and therefore into the public signals. Opening it here
-        // is what turns "some Transfer happened" into "the Transfer this escrow
-        // committed to happened".
-        mirage_gadgets::commitment::open(&opening, &ctx.intent_commitment, &Boolean::TRUE)?;
-        profile(&cs, "intent commitment", &mut mark);
-
-        // The commitment's deployment/request/row context must be the same
-        // context whose statement hash the verifier checks. The commitment
-        // hash alone only authenticates the opening internally.
-        enforce_bytes_equal(&opening.instance_domain, &ctx.instance_domain)?;
-        enforce_bytes_equal(&opening.chain_id, &ctx.chain_id)?;
-        enforce_bytes_equal(&opening.escrow, &ctx.escrow)?;
-        enforce_bytes_equal(&opening.request_id, &ctx.request_id)?;
-        enforce_bytes_equal(&opening.row_index, &ctx.row_index)?;
-        profile(&cs, "context equality", &mut mark);
-        //
-        // The header supplies the root rather than the caller. Accepting a
-        // caller-supplied root would let a prover invent a trie containing
-        // whatever it liked.
-        let parsed =
-            header::parse_authenticated_prefix(&header_bytes, &header_len, &Boolean::TRUE)?;
-        profile(&cs, "header parse", &mut mark);
-
-        // Authenticate both header identity fields carried by the statement.
-        // Parsing a receiptsRoot is not useful unless the parsed header is the
-        // exact witness block selected by the verifier.
-        let header_digest =
-            mirage_gadgets::keccak::keccak256_var(&header_bytes, &header_len, &Boolean::TRUE)?;
-        for (got, want) in header_digest.iter().zip(ctx.witness_block_hash.iter()) {
-            UInt8::from_bits_le(got).enforce_equal(want)?;
-        }
-        profile(&cs, "header hash", &mut mark);
-        let witness_number = fixed_be_value(&ctx.witness_block_number)?;
-        parsed.number.enforce_equal(&witness_number)?;
-
-        // Settlement is valid only in the half-open/closed lease interval:
-        // bondStartBlock < txBlockNumber <= bondDeadline.
-        let bond_start = fixed_be_value(&ctx.bond_start_block)?;
-        let bond_deadline = fixed_be_value(&ctx.bond_deadline)?;
-        lt_u64(&bond_start, &parsed.number)?.enforce_equal(&Boolean::TRUE)?;
-        lt_u64(&bond_deadline, &parsed.number)?.enforce_equal(&Boolean::FALSE)?;
-        profile(&cs, "block/time checks", &mut mark);
-
-        // The receipt is the MPT leaf's value, so inclusion binds the exact
-        // bytes the log walk then inspects. Without that link the relation
-        // would prove a Transfer in *some* receipt rather than one in this
-        // block's trie.
-        ConstructedLeafTraversal::verify_inclusion(
-            &parsed.receipts_root,
-            &key,
-            &key_len,
-            &receipt,
-            &receipt_len,
-            &nodes,
-        )?;
-        profile(&cs, "MPT traversal", &mut mark);
-        // The single-log variant: spec 20.3 requires production settlements be a
-        // direct `transfer()` call, whose receipt carries exactly one event.
-        // Skipping the walk to log `k` saves 16% of the receipt relation.
-        //
-        // The trade is that a receipt with any second event becomes unprovable,
-        // which the enclave's pre-settlement token review must enforce rather
-        // than the prover discovering it. See `receipt::log::sole_log`.
-        Erc20FixedLayout::verify(&receipt, &receipt_len, &log_index, &intent, &Boolean::TRUE)?;
-        profile(&cs, "receipt relation", &mut mark);
-
-        // ---- statement hash ----
-        //
-        // Recomputed from privately supplied context and checked against the
-        // two public signals. Every field is already public on-chain; hashing
-        // them down only shrinks the verifier.
-        let signals = statement::compute(&ctx)?;
-        statement::enforce(&signals, &public_hi, &public_lo, &Boolean::TRUE)?;
-        profile(&cs, "statement hash", &mut mark);
-
         Ok(())
     }
+}
+
+pub fn generate_constraints_with_backend<F: PrimeField, B: PermutationBackend<F>>(
+    circuit: ReceiptCircuit,
+    cs: ConstraintSystemRef<F>,
+    backend: &mut B,
+) -> Result<(), SynthesisError> {
+    let b = circuit.bounds;
+    let w = circuit.w();
+    let mut mark = cs.num_constraints();
+
+    // ---- public inputs ----
+    //
+    // Exactly two, per spec 10.1: the statement hash's 128-bit limbs. Each
+    // public input costs a scalar multiplication in the on-chain verifier
+    // and a G1 point in the embedded verification key, so collapsing the
+    // full context to two keeps the verifier fixed regardless of how many
+    // fields the relation binds.
+    let (want_hi, want_lo) = native_signals(&w.statement);
+    let public_hi = FpVar::new_input(cs.clone(), || Ok(F::from(want_hi)))?;
+    let public_lo = FpVar::new_input(cs.clone(), || Ok(F::from(want_lo)))?;
+
+    // ---- witness allocation ----
+    let header_bytes = alloc_bounded(cs.clone(), &w.header, b.header_bytes)?;
+    let header_len = FpVar::new_witness(cs.clone(), || Ok(F::from(w.header.len() as u64)))?;
+    let key = alloc_bounded(cs.clone(), &w.key, b.key_bytes)?;
+    let key_len = FpVar::new_witness(cs.clone(), || Ok(F::from(w.key.len() as u64)))?;
+
+    let receipt = alloc_bounded(cs.clone(), &w.receipt, b.receipt_bytes)?;
+    let receipt_len = FpVar::new_witness(cs.clone(), || Ok(F::from(w.receipt.len() as u64)))?;
+
+    // The terminal leaf is constructed from the key remainder and receipt,
+    // so only the at-most `depth - 1` ancestor nodes are witnesses.
+    let ancestor_count = w.nodes.len().saturating_sub(1);
+    let mut nodes = Vec::with_capacity(b.depth.saturating_sub(1));
+    for i in 0..b.depth.saturating_sub(1) {
+        // An active root is necessarily a branch: a root leaf is the
+        // zero-ancestor case constructed below. With three-byte RLP
+        // transaction-index keys, only first nibbles 0..=8 can occur, so
+        // at most nine 33-byte child references plus seven empty slots,
+        // an empty value and the three-byte list header fit in 308 bytes.
+        // Deeper branches can occupy all sixteen slots: 16*33 bytes of
+        // hash references, one empty value byte, and a three-byte list
+        // header are exactly 532 bytes. These are structural maxima, not
+        // sampled cutoffs.
+        let node_bound = if i == 0 { 308 } else { 532 };
+        let (bytes, len, active) = match w.nodes.get(i).filter(|_| i < ancestor_count) {
+            Some(n) => (n.clone(), n.len(), true),
+            None => (Vec::new(), 0, false),
+        };
+        nodes.push(ProofNode {
+            bytes: alloc_bounded(cs.clone(), &bytes, node_bound)?,
+            len: FpVar::new_witness(cs.clone(), || Ok(F::from(len as u64)))?,
+            active: Boolean::new_witness(cs.clone(), || Ok(active))?,
+        });
+    }
+
+    // The opened commitment, whose token/recipient/amount become the intent
+    // the receipt relation checks. Opening it and then checking the log
+    // against different values would defeat the whole exercise, so the same
+    // allocations are used for both.
+    let opening = alloc_opening(cs.clone(), &w.intent)?;
+    let ctx = alloc_statement(cs.clone(), &w.statement)?;
+    let intent = Intent {
+        token: opening.settlement_token.clone(),
+        recipient: opening.recipient.clone(),
+        amount: opening.settlement_amount.clone(),
+    };
+    let log_index = FpVar::new_witness(cs.clone(), || Ok(F::from(w.log_index as u64)))?;
+    profile(&cs, "allocation", &mut mark);
+
+    // ---- the relation ----
+    //
+    // The chain of bindings is what makes this a proof rather than a
+    // satisfiability check:
+    //
+    //   commitment ->  token/recipient/amount
+    //   header     ->  receiptsRoot -> MPT inclusion -> receipt -> log
+    //
+    // The commitment is the escrow's stored value, carried into the
+    // statement hash and therefore into the public signals. Opening it here
+    // is what turns "some Transfer happened" into "the Transfer this escrow
+    // committed to happened".
+    mirage_gadgets::commitment::open_with(
+        &opening,
+        &ctx.intent_commitment,
+        &Boolean::TRUE,
+        backend,
+    )?;
+    profile(&cs, "intent commitment", &mut mark);
+
+    // The commitment's deployment/request/row context must be the same
+    // context whose statement hash the verifier checks. The commitment
+    // hash alone only authenticates the opening internally.
+    enforce_bytes_equal(&opening.instance_domain, &ctx.instance_domain)?;
+    enforce_bytes_equal(&opening.chain_id, &ctx.chain_id)?;
+    enforce_bytes_equal(&opening.escrow, &ctx.escrow)?;
+    enforce_bytes_equal(&opening.request_id, &ctx.request_id)?;
+    enforce_bytes_equal(&opening.row_index, &ctx.row_index)?;
+    profile(&cs, "context equality", &mut mark);
+    //
+    // The header supplies the root rather than the caller. Accepting a
+    // caller-supplied root would let a prover invent a trie containing
+    // whatever it liked.
+    let parsed = header::parse_authenticated_prefix(&header_bytes, &header_len, &Boolean::TRUE)?;
+    profile(&cs, "header parse", &mut mark);
+
+    // Authenticate both header identity fields carried by the statement.
+    // Parsing a receiptsRoot is not useful unless the parsed header is the
+    // exact witness block selected by the verifier.
+    let header_digest = mirage_gadgets::keccak::keccak256_var_with(
+        &header_bytes,
+        &header_len,
+        &Boolean::TRUE,
+        backend,
+    )?;
+    for (got, want) in header_digest.iter().zip(ctx.witness_block_hash.iter()) {
+        UInt8::from_bits_le(got).enforce_equal(want)?;
+    }
+    profile(&cs, "header hash", &mut mark);
+    let witness_number = fixed_be_value(&ctx.witness_block_number)?;
+    parsed.number.enforce_equal(&witness_number)?;
+
+    // Settlement is valid only in the half-open/closed lease interval:
+    // bondStartBlock < txBlockNumber <= bondDeadline.
+    let bond_start = fixed_be_value(&ctx.bond_start_block)?;
+    let bond_deadline = fixed_be_value(&ctx.bond_deadline)?;
+    lt_u64(&bond_start, &parsed.number)?.enforce_equal(&Boolean::TRUE)?;
+    lt_u64(&bond_deadline, &parsed.number)?.enforce_equal(&Boolean::FALSE)?;
+    profile(&cs, "block/time checks", &mut mark);
+
+    // The receipt is the MPT leaf's value, so inclusion binds the exact
+    // bytes the log walk then inspects. Without that link the relation
+    // would prove a Transfer in *some* receipt rather than one in this
+    // block's trie.
+    ConstructedLeafTraversal::verify_inclusion_with(
+        &parsed.receipts_root,
+        &key,
+        &key_len,
+        &receipt,
+        &receipt_len,
+        &nodes,
+        backend,
+    )?;
+    profile(&cs, "MPT traversal", &mut mark);
+    // The single-log variant: spec 20.3 requires production settlements be a
+    // direct `transfer()` call, whose receipt carries exactly one event.
+    // Skipping the walk to log `k` saves 16% of the receipt relation.
+    //
+    // The trade is that a receipt with any second event becomes unprovable,
+    // which the enclave's pre-settlement token review must enforce rather
+    // than the prover discovering it. See `receipt::log::sole_log`.
+    Erc20FixedLayout::verify(&receipt, &receipt_len, &log_index, &intent, &Boolean::TRUE)?;
+    profile(&cs, "receipt relation", &mut mark);
+
+    // ---- statement hash ----
+    //
+    // Recomputed from privately supplied context and checked against the
+    // two public signals. Every field is already public on-chain; hashing
+    // them down only shrinks the verifier.
+    let signals = statement::compute_with(&ctx, backend)?;
+    statement::enforce(&signals, &public_hi, &public_lo, &Boolean::TRUE)?;
+    profile(&cs, "statement hash", &mut mark);
+
+    Ok(())
 }
 
 fn enforce_bytes_equal<F: PrimeField>(
@@ -741,6 +788,14 @@ mod tests {
         assert!(!cs.is_satisfied().unwrap(), "{message}");
     }
 
+    fn assert_rejected_batched(w: Witness, message: &str) {
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        KeccacheckReceiptCircuit::prove(Bounds::default(), w)
+            .generate_constraints(cs.clone())
+            .unwrap();
+        assert!(!cs.is_satisfied().unwrap(), "{message}");
+    }
+
     /// The gap this closes: a prover must not be able to substitute the
     /// settlement details.
     ///
@@ -834,5 +889,52 @@ mod tests {
             cs.which_is_unsatisfied()
         );
         assert_eq!(cs.num_constraints(), 8_095_727);
+    }
+
+    #[test]
+    fn genuine_witness_satisfies_with_batched_keccacheck() {
+        use mirage_keccacheck_arkworks::batch::KeccacheckBatch;
+
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        let circuit = ReceiptCircuit::prove(Bounds::default(), fixture::genuine());
+        let mut batch = KeccacheckBatch::new(cs.clone());
+        generate_constraints_with_backend(circuit, cs.clone(), &mut batch).unwrap();
+        let before_batch_verifier = cs.num_constraints();
+        let result = batch.finish().unwrap();
+        eprintln!(
+            "keccacheck relation: {} recorded, {} padded, {} non-GKR, {} GKR, {} total",
+            result.recorded,
+            result.padded,
+            before_batch_verifier,
+            result.profile.total,
+            cs.num_constraints(),
+        );
+        assert_eq!(result.recorded, 38);
+        assert_eq!(result.padded, 64);
+        assert_eq!(cs.num_constraints(), 4_034_927);
+        assert!(
+            cs.is_satisfied().unwrap(),
+            "unsatisfied: {:?}",
+            cs.which_is_unsatisfied()
+        );
+    }
+
+    #[test]
+    fn batched_keccacheck_rejects_wrong_header_hash() {
+        let mut witness = fixture::genuine();
+        witness.statement.witness_block_hash[0] ^= 1;
+        assert_rejected_batched(
+            witness,
+            "batched Keccacheck accepted a header digest mismatch",
+        );
+    }
+
+    #[test]
+    fn batched_setup_and_prove_shapes_match() {
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        KeccacheckReceiptCircuit::setup(Bounds::default())
+            .generate_constraints(cs.clone())
+            .unwrap();
+        assert_eq!(cs.num_constraints(), 4_034_927);
     }
 }

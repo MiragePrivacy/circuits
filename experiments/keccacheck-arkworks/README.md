@@ -4,11 +4,18 @@ This excluded standalone crate ports the recursive Keccacheck verifier from
 gnark to arkworks R1CS. It deliberately consumes the native proof produced by
 Reilabs' Rust `gkr` crate at pinned commit
 `15f00e3da5622f1c7155b02d1f9c00bd2416c282` with WHIR disabled, matching the
-reference's direct input-bit verification mode.
+reference's direct input-bit verification mode. The circuit side now uses
+arkworks 0.6, matching Mirage; the pinned native Rust prover remains on 0.5 and
+crosses that boundary through canonical BN254 scalar values.
 
-The experiment is isolated because the reference currently uses arkworks 0.5
-while Mirage uses 0.6. It is not production code and does not alter Mirage's
-existing Keccak gadget or relation.
+It is still experimental, but the integration branch now supplies a deferred
+backend used by the real Mirage relation and an alternate Rust prover API.
+
+The runtime path is Rust-only. The gnark source is neither linked nor executed;
+it was used as a readable reference for the circuit formulas. Cargo currently
+fetches the pinned Rust `gkr` source at build time, so a production enclave
+build should vendor that dependency, but the resulting enclave does not need
+Go or network access.
 
 Upstream Keccacheck is licensed Apache-2.0. The verifier formulas and Poseidon2
 transcript parameters ported here retain that provenance; see

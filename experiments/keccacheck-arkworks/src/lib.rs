@@ -4,6 +4,7 @@
 //! This crate ports only the verifier that would replace Mirage's direct
 //! Keccak-f constraints.
 
+pub mod batch;
 pub mod direct;
 pub mod poseidon2;
 mod poseidon2_constants;

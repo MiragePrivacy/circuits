@@ -55,8 +55,8 @@
 mod permutation;
 pub mod sponge;
 
-pub use permutation::{keccak_f1600, State};
-pub use sponge::{keccak256_fixed, keccak256_var};
+pub use permutation::{keccak_f1600, DirectPermutation, PermutationBackend, State};
+pub use sponge::{keccak256_fixed, keccak256_fixed_with, keccak256_var, keccak256_var_with};
 
 /// Rate in bytes for keccak-256: 200 - 2*32.
 pub const RATE: usize = 136;

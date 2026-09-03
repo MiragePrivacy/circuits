@@ -17,13 +17,13 @@ use ark_r1cs_std::uint8::UInt8;
 use ark_r1cs_std::GR1CSVar;
 use ark_relations::gr1cs::SynthesisError;
 
-use super::constructed_leaf::hash_leaf_from_remainder;
+use super::constructed_leaf::hash_leaf_from_remainder_with;
 use super::node::{branch_child_offset, decode_branch, decode_short};
 use super::path::{assert_canonical_flags, assert_even_pad_is_zero, nibble_at, read_flags};
 use super::traverse::{assert_path_matches, bits_to_byte};
 use super::{MptVerifier, ProofNode};
 use crate::bytes::{one_hot, select_byte_with, select_bytes, zero_like};
-use crate::keccak::keccak256_var;
+use crate::keccak::{keccak256_var_with, DirectPermutation, PermutationBackend};
 
 pub struct ConstructedLeafTraversal;
 
@@ -47,6 +47,28 @@ impl<F: PrimeField> MptVerifier<F> for ConstructedLeafTraversal {
         value_len: &FpVar<F>,
         nodes: &[ProofNode<F>],
     ) -> Result<(), SynthesisError> {
+        Self::verify_inclusion_with(
+            root,
+            key,
+            key_len,
+            value,
+            value_len,
+            nodes,
+            &mut DirectPermutation,
+        )
+    }
+}
+
+impl ConstructedLeafTraversal {
+    pub fn verify_inclusion_with<F: PrimeField, B: PermutationBackend<F>>(
+        root: &[UInt8<F>],
+        key: &[UInt8<F>],
+        key_len: &FpVar<F>,
+        value: &[UInt8<F>],
+        value_len: &FpVar<F>,
+        nodes: &[ProofNode<F>],
+        backend: &mut B,
+    ) -> Result<(), SynthesisError> {
         let mut expected = root.to_vec();
         let mut consumed = zero_like(key)?;
         let mut inactive_seen = Boolean::FALSE;
@@ -64,7 +86,7 @@ impl<F: PrimeField> MptVerifier<F> for ConstructedLeafTraversal {
             (inactive_seen.clone() & active.clone()).enforce_equal(&Boolean::FALSE)?;
             inactive_seen |= !active.clone();
 
-            let digest = keccak256_var(&level.bytes, &level.len, &active)?;
+            let digest = keccak256_var_with(&level.bytes, &level.len, &active, backend)?;
             for (digest_byte, want) in digest.iter().zip(expected.iter()) {
                 bits_to_byte(digest_byte)?.conditional_enforce_equal(want, &active)?;
             }
@@ -80,11 +102,8 @@ impl<F: PrimeField> MptVerifier<F> for ConstructedLeafTraversal {
                 let nibble = nibble_at(key, &consumed)?;
                 let child_offset = branch_child_offset(&branch, &nibble, &active)?;
                 let next_ref = select_bytes(&level.bytes, &child_offset, 32)?;
-                consumed = FpVar::conditionally_select(
-                    &active,
-                    &(&consumed + FpVar::one()),
-                    &consumed,
-                )?;
+                consumed =
+                    FpVar::conditionally_select(&active, &(&consumed + FpVar::one()), &consumed)?;
                 expected = expected
                     .iter()
                     .zip(next_ref.iter())
@@ -107,8 +126,7 @@ impl<F: PrimeField> MptVerifier<F> for ConstructedLeafTraversal {
                 .map(|byte| byte.value().unwrap_or(0))
                 .collect();
             let native_branch = native_list_arity(&native_bytes) == Some(17);
-            let this_is_branch =
-                Boolean::new_witness(level.len.cs(), || Ok(native_branch))?;
+            let this_is_branch = Boolean::new_witness(level.len.cs(), || Ok(native_branch))?;
             profile(&level.bytes, "shape-hint", &mut mark);
             let branch_active = active.clone() & this_is_branch.clone();
             let short_active = active.clone() & !this_is_branch.clone();
@@ -131,10 +149,9 @@ impl<F: PrimeField> MptVerifier<F> for ConstructedLeafTraversal {
             flags
                 .is_leaf
                 .conditional_enforce_equal(&Boolean::FALSE, &short_active)?;
-            short.tail_len.conditional_enforce_equal(
-                &FpVar::constant(F::from(32u64)),
-                &short_active,
-            )?;
+            short
+                .tail_len
+                .conditional_enforce_equal(&FpVar::constant(F::from(32u64)), &short_active)?;
             profile(&level.bytes, "flags", &mut mark);
 
             let path_nibbles = &short.path_len * FpVar::constant(F::from(2u64))
@@ -158,16 +175,8 @@ impl<F: PrimeField> MptVerifier<F> for ConstructedLeafTraversal {
                 FpVar::conditionally_select(&this_is_branch, &child_offset, &short.tail_offset)?;
             let next_ref = select_bytes(&level.bytes, &next_offset, 32)?;
             profile(&level.bytes, "tail-read", &mut mark);
-            let step = FpVar::conditionally_select(
-                &this_is_branch,
-                &FpVar::one(),
-                &path_nibbles,
-            )?;
-            consumed = FpVar::conditionally_select(
-                &active,
-                &(&consumed + step),
-                &consumed,
-            )?;
+            let step = FpVar::conditionally_select(&this_is_branch, &FpVar::one(), &path_nibbles)?;
+            consumed = FpVar::conditionally_select(&active, &(&consumed + step), &consumed)?;
             expected = expected
                 .iter()
                 .zip(next_ref.iter())
@@ -180,8 +189,15 @@ impl<F: PrimeField> MptVerifier<F> for ConstructedLeafTraversal {
             .first()
             .map(|byte| byte.cs().num_constraints())
             .unwrap_or(0);
-        let leaf_digest =
-            hash_leaf_from_remainder(value, value_len, key, key_len, &consumed, &Boolean::TRUE)?;
+        let leaf_digest = hash_leaf_from_remainder_with(
+            value,
+            value_len,
+            key,
+            key_len,
+            &consumed,
+            &Boolean::TRUE,
+            backend,
+        )?;
         profile(key, "constructed-leaf", &mut leaf_mark);
         for (digest_byte, want) in leaf_digest.iter().zip(expected.iter()) {
             bits_to_byte(digest_byte)?.enforce_equal(want)?;
@@ -248,9 +264,7 @@ mod tests {
 
     use crate::bytes::alloc_bounded;
     use crate::mpt::harness::NativeProof;
-    use crate::mpt::tests::{
-        branch_node, extension_node, leaf_node, simple_trie,
-    };
+    use crate::mpt::tests::{branch_node, extension_node, leaf_node, simple_trie};
 
     fn genuine() -> NativeProof {
         let key = vec![0x35, 0x71];
@@ -272,16 +286,12 @@ mod tests {
         }
     }
 
-    fn build(
-        cs: ConstraintSystemRef<Fr>,
-        p: &NativeProof,
-    ) -> Result<(), SynthesisError> {
+    fn build(cs: ConstraintSystemRef<Fr>, p: &NativeProof) -> Result<(), SynthesisError> {
         let root = alloc_bounded(cs.clone(), &p.root, 32)?;
         let key = alloc_bounded(cs.clone(), &p.key, 3)?;
         let key_len = FpVar::new_witness(cs.clone(), || Ok(Fr::from(p.key.len() as u64)))?;
         let value = alloc_bounded(cs.clone(), &p.value, 448)?;
-        let value_len =
-            FpVar::new_witness(cs.clone(), || Ok(Fr::from(p.value.len() as u64)))?;
+        let value_len = FpVar::new_witness(cs.clone(), || Ok(Fr::from(p.value.len() as u64)))?;
 
         let ancestor_count = p.nodes.len().saturating_sub(1);
         let mut nodes = Vec::with_capacity(3);
@@ -297,12 +307,7 @@ mod tests {
             });
         }
         ConstructedLeafTraversal::verify_inclusion(
-            &root,
-            &key,
-            &key_len,
-            &value,
-            &value_len,
-            &nodes,
+            &root, &key, &key_len, &value, &value_len, &nodes,
         )
     }
 
@@ -341,7 +346,10 @@ mod tests {
 
         let mut wrong_ancestor = genuine();
         wrong_ancestor.nodes[0][7] ^= 1;
-        assert!(!verify(&wrong_ancestor), "accepted an unauthenticated ancestor");
+        assert!(
+            !verify(&wrong_ancestor),
+            "accepted an unauthenticated ancestor"
+        );
     }
 
     #[test]

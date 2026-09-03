@@ -20,7 +20,7 @@ use ark_relations::gr1cs::SynthesisError;
 
 use crate::bytes::byte_to_field;
 use crate::keccak::sponge::Byte;
-use crate::keccak::keccak256_var;
+use crate::keccak::{keccak256_var_with, DirectPermutation, PermutationBackend};
 use crate::mpt::path::nibble_at;
 
 /// Constructs and hashes `RLP([HP(key[consumed..], leaf), receipt])`.
@@ -36,6 +36,26 @@ pub fn hash_leaf_from_remainder<F: PrimeField>(
     consumed: &FpVar<F>,
     active: &Boolean<F>,
 ) -> Result<[Byte<F>; 32], SynthesisError> {
+    hash_leaf_from_remainder_with(
+        receipt,
+        receipt_len,
+        key,
+        key_len,
+        consumed,
+        active,
+        &mut DirectPermutation,
+    )
+}
+
+pub fn hash_leaf_from_remainder_with<F: PrimeField, B: PermutationBackend<F>>(
+    receipt: &[UInt8<F>],
+    receipt_len: &FpVar<F>,
+    key: &[UInt8<F>],
+    key_len: &FpVar<F>,
+    consumed: &FpVar<F>,
+    active: &Boolean<F>,
+    backend: &mut B,
+) -> Result<[Byte<F>; 32], SynthesisError> {
     let cs = receipt_len.cs();
     let len_value = receipt_len.value().unwrap_or(F::zero());
     let mut len_bytes = len_value.into_bigint().to_bytes_le();
@@ -47,10 +67,8 @@ pub fn hash_leaf_from_remainder<F: PrimeField>(
     let decode_u16 = |hi: &UInt8<F>, low: &UInt8<F>| -> Result<FpVar<F>, SynthesisError> {
         Ok(byte_to_field(hi)? * FpVar::constant(F::from(256u64)) + byte_to_field(low)?)
     };
-    decode_u16(&receipt_hi, &receipt_low)?
-        .conditional_enforce_equal(receipt_len, active)?;
-    receipt_hi
-        .conditional_enforce_equal(&UInt8::constant(1), active)?;
+    decode_u16(&receipt_hi, &receipt_low)?.conditional_enforce_equal(receipt_len, active)?;
+    receipt_hi.conditional_enforce_equal(&UInt8::constant(1), active)?;
 
     let total_nibbles = key_len * FpVar::constant(F::from(2u64));
     let remaining = &total_nibbles - consumed;
@@ -104,7 +122,7 @@ pub fn hash_leaf_from_remainder<F: PrimeField>(
     }
 
     let leaf_len = receipt_len + path_item_len + FpVar::constant(F::from(6u64));
-    keccak256_var(&leaf, &leaf_len, active)
+    keccak256_var_with(&leaf, &leaf_len, active, backend)
 }
 
 fn path_bytes<F: PrimeField>(
@@ -118,17 +136,12 @@ fn path_bytes<F: PrimeField>(
     if n % 2 == 0 {
         expressions.push(FpVar::constant(F::from(0x20u64)));
     } else {
-        expressions.push(
-            FpVar::constant(F::from(0x30u64)) + nibble_at(key, consumed)?,
-        );
+        expressions.push(FpVar::constant(F::from(0x30u64)) + nibble_at(key, consumed)?);
     }
     let mut j = n % 2;
     while j < n {
         let high = nibble_at(key, &(consumed + FpVar::constant(F::from(j as u64))))?;
-        let low = nibble_at(
-            key,
-            &(consumed + FpVar::constant(F::from((j + 1) as u64))),
-        )?;
+        let low = nibble_at(key, &(consumed + FpVar::constant(F::from((j + 1) as u64))))?;
         expressions.push(high * FpVar::constant(F::from(16u64)) + low);
         j += 2;
     }
@@ -202,7 +215,8 @@ mod tests {
         for consumed in 0..=6 {
             let cs = ConstraintSystem::<Fr>::new_ref();
             let buf = alloc_bounded(cs.clone(), &receipt, 448).unwrap();
-            let len = FpVar::new_witness(cs.clone(), || Ok(Fr::from(receipt.len() as u64))).unwrap();
+            let len =
+                FpVar::new_witness(cs.clone(), || Ok(Fr::from(receipt.len() as u64))).unwrap();
             let key_buf = alloc_bounded(cs.clone(), &key, 3).unwrap();
             let key_len = FpVar::new_witness(cs.clone(), || Ok(Fr::from(3u64))).unwrap();
             let consumed_var =
@@ -219,9 +233,9 @@ mod tests {
             let got: Vec<u8> = digest
                 .iter()
                 .map(|bits| {
-                    bits.iter().enumerate().fold(0u8, |v, (i, b)| {
-                        v | ((b.value().unwrap() as u8) << i)
-                    })
+                    bits.iter()
+                        .enumerate()
+                        .fold(0u8, |v, (i, b)| v | ((b.value().unwrap() as u8) << i))
                 })
                 .collect();
             assert_eq!(
@@ -243,15 +257,8 @@ mod tests {
         let key = alloc_bounded(cs.clone(), &[0x12], 3).unwrap();
         let key_len = FpVar::new_witness(cs.clone(), || Ok(Fr::from(1u64))).unwrap();
         let consumed = FpVar::new_witness(cs.clone(), || Ok(Fr::from(0u64))).unwrap();
-        let _ = hash_leaf_from_remainder(
-            &buf,
-            &len,
-            &key,
-            &key_len,
-            &consumed,
-            &Boolean::TRUE,
-        )
-        .unwrap();
+        let _ = hash_leaf_from_remainder(&buf, &len, &key, &key_len, &consumed, &Boolean::TRUE)
+            .unwrap();
         assert!(!cs.is_satisfied().unwrap());
     }
 
@@ -265,15 +272,11 @@ mod tests {
         let key_len = FpVar::new_witness(cs.clone(), || Ok(Fr::from(1u64))).unwrap();
         let consumed = FpVar::new_witness(cs.clone(), || Ok(Fr::from(2u64))).unwrap();
         let before = cs.num_constraints();
-        let _ = hash_leaf_from_remainder(
-            &buf,
-            &len,
-            &key,
-            &key_len,
-            &consumed,
-            &Boolean::TRUE,
-        )
-        .unwrap();
-        println!("constructed finite-family leaf: {} constraints", cs.num_constraints() - before);
+        let _ = hash_leaf_from_remainder(&buf, &len, &key, &key_len, &consumed, &Boolean::TRUE)
+            .unwrap();
+        println!(
+            "constructed finite-family leaf: {} constraints",
+            cs.num_constraints() - before
+        );
     }
 }
