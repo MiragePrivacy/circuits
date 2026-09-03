@@ -8,6 +8,7 @@
 //! Run:
 //! ```sh
 //! RAYON_NUM_THREADS=16 cargo run -p mirage-prover --release --bin measure
+//! RAYON_NUM_THREADS=16 cargo run -p mirage-prover --release --bin measure -- --keccacheck
 //! ```
 //!
 //! Peak RSS is read from `/proc/self/status` `VmHWM`, the same metric the
@@ -22,7 +23,9 @@ use ark_serialize::CanonicalSerialize;
 use ark_snark::SNARK;
 use ark_std::rand::SeedableRng;
 
-use mirage_relation::{fixture, Bounds, ReceiptCircuit, MEASUREMENT_SCOPE};
+use mirage_relation::{
+    fixture, Bounds, KeccacheckReceiptCircuit, ReceiptCircuit, MEASUREMENT_SCOPE,
+};
 
 /// Peak resident set size in bytes, from `VmHWM`.
 fn peak_rss() -> u64 {
@@ -42,10 +45,19 @@ fn gb(bytes: u64) -> f64 {
 }
 
 fn main() {
+    let keccacheck = std::env::args().any(|arg| arg == "--keccacheck");
     let threads = std::env::var("RAYON_NUM_THREADS").unwrap_or_else(|_| "default".into());
     let bounds = Bounds::default();
 
     println!("scope:   {MEASUREMENT_SCOPE}");
+    println!(
+        "circuit: {}",
+        if keccacheck {
+            "KeccacheckReceiptCircuit"
+        } else {
+            "ReceiptCircuit"
+        }
+    );
     println!(
         "bounds:  node {} B, key {} B, receipt {} B, depth {}",
         bounds.node_bytes, bounds.key_bytes, bounds.receipt_bytes, bounds.depth
@@ -56,9 +68,15 @@ fn main() {
     // ---- constraint count ----
     let t = Instant::now();
     let cs = ConstraintSystem::<Fr>::new_ref();
-    ReceiptCircuit::prove(bounds, fixture::genuine())
-        .generate_constraints(cs.clone())
-        .expect("synthesis");
+    if keccacheck {
+        KeccacheckReceiptCircuit::prove(bounds, fixture::genuine())
+            .generate_constraints(cs.clone())
+            .expect("synthesis");
+    } else {
+        ReceiptCircuit::prove(bounds, fixture::genuine())
+            .generate_constraints(cs.clone())
+            .expect("synthesis");
+    }
     let satisfied = cs.is_satisfied().expect("satisfiability");
     let n = cs.num_constraints();
     println!(
@@ -76,9 +94,13 @@ fn main() {
     // artifact through a sound process.
     let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(0);
     let t = Instant::now();
-    let (pk, vk) =
+    let (pk, vk) = if keccacheck {
+        Groth16::<Bn254>::circuit_specific_setup(KeccacheckReceiptCircuit::setup(bounds), &mut rng)
+            .expect("setup")
+    } else {
         Groth16::<Bn254>::circuit_specific_setup(ReceiptCircuit::setup(bounds), &mut rng)
-            .expect("setup");
+            .expect("setup")
+    };
     let setup_secs = t.elapsed().as_secs_f64();
     let pk_bytes = pk.serialized_size(ark_serialize::Compress::No);
     let pk_compressed = pk.serialized_size(ark_serialize::Compress::Yes);
@@ -90,12 +112,21 @@ fn main() {
 
     // ---- prove ----
     let t = Instant::now();
-    let proof = Groth16::<Bn254>::prove(
-        &pk,
-        ReceiptCircuit::prove(bounds, fixture::genuine()),
-        &mut rng,
-    )
-    .expect("prove");
+    let proof = if keccacheck {
+        Groth16::<Bn254>::prove(
+            &pk,
+            KeccacheckReceiptCircuit::prove(bounds, fixture::genuine()),
+            &mut rng,
+        )
+        .expect("prove")
+    } else {
+        Groth16::<Bn254>::prove(
+            &pk,
+            ReceiptCircuit::prove(bounds, fixture::genuine()),
+            &mut rng,
+        )
+        .expect("prove")
+    };
     let prove_secs = t.elapsed().as_secs_f64();
     println!("prove:        {prove_secs:>8.1}s");
 

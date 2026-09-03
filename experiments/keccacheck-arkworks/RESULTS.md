@@ -98,8 +98,31 @@ The integration now has an alternate `KeccacheckReceiptCircuit` and Rust
    temporary dual-version scalar conversion.
 4. Investigate the arkworks overhead relative to gnark, principally
    in the round verifier and transcript expression lowering.
-5. Only after those checks, run one full Groth16 setup/prove/
-   verify benchmark and evaluate the larger witness-generation path.
+5. Measure a latency distribution and peak proving-only memory on the target
+   enclave after the native GKR dependency is made enclave-compatible.
 
 The GKR proof occupies about 307 KiB at 64 permutations, but it is private
 Groth16 witness data, not calldata and not an additional on-chain proof.
+
+## End-to-end Groth16 measurement
+
+Commit `8b60d00` was measured in release mode on an Intel Core i9-14900HX with
+16 Rayon threads. This is one complete local sample, not a latency
+distribution or an enclave measurement.
+
+| Stage | Measurement |
+|---|---:|
+| Constraints | 4,034,927 |
+| Satisfying diagnostic synthesis | 35.7 s |
+| Circuit-specific Groth16 setup | 28.8 s |
+| Groth16 proving | 24.9 s |
+| Groth16 verification | 1.52 ms |
+| Peak process RSS across synthesis, setup, and proving | 12.6 GiB |
+| Proving key | 1.44 GiB uncompressed / 0.72 GiB compressed |
+| Compressed proof | 128 bytes |
+
+The 24.9-second proving measurement includes native GKR witness generation,
+outer-circuit synthesis, witness mapping, and the Groth16 multiexponentiations.
+The generated proof verified against its two public statement-hash limbs and
+was rejected after mutating one limb. The 28.8-second deterministic setup is a
+measurement stand-in, not a production ceremony.
