@@ -23,7 +23,6 @@ use std::path::PathBuf;
 
 use ark_bn254::Bn254;
 use ark_groth16::VerifyingKey;
-use ark_std::rand::SeedableRng;
 use taceo_groth16_sol::{SolidityVerifierConfig, SolidityVerifierContext};
 
 use mirage_relation::{fixture, Bounds};
@@ -65,8 +64,7 @@ fn main() {
     // that fails is ambiguous unless the proof is known good.
     eprintln!("proving...");
     let settlement = if keccachecheck {
-        let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(0);
-        mirage_prover::prove_keccacheck(&keys, bounds, &witness, &mut rng)
+        mirage_prover::prove_keccacheck_seeded(&keys, bounds, &witness, 0)
             .expect("Keccacheck prove")
     } else {
         mirage_prover::prove_seeded(&keys, bounds, &witness, 0).expect("prove")
