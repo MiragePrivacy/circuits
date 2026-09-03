@@ -29,6 +29,24 @@ use ark_relations::gr1cs::SynthesisError;
 /// 25 lanes of 64 bits.
 pub type State<F> = [[Boolean<F>; 64]; 25];
 
+/// Backend used by the sponge for each Keccak-f permutation.
+///
+/// The default implementation below emits the direct Boolean constraints.
+/// Experimental coprocessor backends can instead allocate the output state,
+/// record the input/output pair, and verify the entire batch once.
+pub trait PermutationBackend<F: PrimeField> {
+    fn permute(&mut self, state: State<F>) -> Result<State<F>, SynthesisError>;
+}
+
+#[derive(Default)]
+pub struct DirectPermutation;
+
+impl<F: PrimeField> PermutationBackend<F> for DirectPermutation {
+    fn permute(&mut self, state: State<F>) -> Result<State<F>, SynthesisError> {
+        keccak_f1600(state)
+    }
+}
+
 /// Rotation offsets, indexed by the rho/pi step order.
 const RHO: [u32; 24] = [
     1, 3, 6, 10, 15, 21, 28, 36, 45, 55, 2, 14, 27, 41, 56, 8, 25, 43, 62, 18, 39, 61, 20, 44,

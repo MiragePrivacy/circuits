@@ -4,9 +4,11 @@
 
 use crate::poseidon2::SpongeVar;
 use ark_bn254::Fr;
+use ark_bn254_05::Fr as Fr05;
 use ark_ff::{MontFp, One, Zero};
 use ark_r1cs_std::{alloc::AllocVar, boolean::Boolean, eq::EqGadget, fields::fp::FpVar};
-use ark_relations::r1cs::{ConstraintSystemRef, SynthesisError};
+use ark_relations::gr1cs::{ConstraintSystemRef, SynthesisError};
+use std::str::FromStr;
 
 const HALF: Fr =
     MontFp!("10944121435919637611123202872628637544274182200208017171849102093287904247809");
@@ -390,13 +392,13 @@ fn verify_round(
     Ok((vrs_a, iota))
 }
 
-pub fn derive_r_native(output: &[u64], log_instances: usize) -> Vec<Fr> {
+pub fn derive_r_native(output: &[u64], log_instances: usize) -> Vec<Fr05> {
     if log_instances == 0 {
         return Vec::new();
     }
     let mut sponge = gkr::transcript::Sponge::new();
     for value in output {
-        sponge.absorb(Fr::from(*value));
+        sponge.absorb(Fr05::from(*value));
     }
     (0..log_instances).map(|_| sponge.squeeze()).collect()
 }
@@ -443,18 +445,11 @@ pub fn verify_witness_profile(
     let instances = witness.input.len() / 25;
     assert!(instances.is_power_of_two());
     assert_eq!(witness.output.len(), 25 * instances);
-    let log_instances = instances.ilog2() as usize;
-    let num_vars = log_instances + 6;
 
     let proof = witness
         .proof
         .iter()
         .map(|value| FpVar::new_witness(cs.clone(), || Ok(*value)))
-        .collect::<Result<Vec<_>, _>>()?;
-    let output = witness
-        .output
-        .iter()
-        .map(|value| FpVar::new_witness(cs.clone(), || Ok(Fr::from(*value))))
         .collect::<Result<Vec<_>, _>>()?;
     let mut input_bits = Vec::with_capacity(witness.input.len() * 64);
     for value in &witness.input {
@@ -464,8 +459,90 @@ pub fn verify_witness_profile(
             })?);
         }
     }
-    let input_bits = input_bits.into_iter().map(FpVar::from).collect::<Vec<_>>();
+    let mut output_bits = Vec::with_capacity(witness.output.len() * 64);
+    for value in &witness.output {
+        for bit in 0..64 {
+            output_bits.push(Boolean::new_witness(cs.clone(), || {
+                Ok((value >> bit) & 1 == 1)
+            })?);
+        }
+    }
     let after_allocation = cs.num_constraints();
+    verify_allocated(
+        cs,
+        proof,
+        &input_bits,
+        &output_bits,
+        instances,
+        start,
+        after_allocation,
+    )
+}
+
+/// Verify a Keccacheck proof against state bits owned by the calling circuit.
+///
+/// Both bit slices use `[lane][instance][little-endian bit]` order. This is the
+/// integration boundary needed by Mirage's sponge: verified output bits can be
+/// reused directly as the next permutation's input state or as digest bits.
+pub fn verify_boolean_batch(
+    cs: ConstraintSystemRef<Fr>,
+    proof_values: &[Fr],
+    input_bits: &[Boolean<Fr>],
+    output_bits: &[Boolean<Fr>],
+) -> Result<VerificationProfile, SynthesisError> {
+    assert_eq!(input_bits.len(), output_bits.len());
+    assert_eq!(input_bits.len() % (25 * 64), 0);
+    let instances = input_bits.len() / (25 * 64);
+    assert!(instances.is_power_of_two());
+    let start = cs.num_constraints();
+    let proof = proof_values
+        .iter()
+        .map(|value| FpVar::new_witness(cs.clone(), || Ok(*value)))
+        .collect::<Result<Vec<_>, _>>()?;
+    let after_allocation = cs.num_constraints();
+    verify_allocated(
+        cs,
+        proof,
+        input_bits,
+        output_bits,
+        instances,
+        start,
+        after_allocation,
+    )
+}
+
+fn verify_allocated(
+    cs: ConstraintSystemRef<Fr>,
+    proof: Vec<FpVar<Fr>>,
+    input_booleans: &[Boolean<Fr>],
+    output_booleans: &[Boolean<Fr>],
+    instances: usize,
+    start: usize,
+    after_allocation: usize,
+) -> Result<VerificationProfile, SynthesisError> {
+    let log_instances = instances.ilog2() as usize;
+    let num_vars = log_instances + 6;
+    let input_bits = input_booleans
+        .iter()
+        .cloned()
+        .map(FpVar::from)
+        .collect::<Vec<_>>();
+    let output_bits = output_booleans
+        .iter()
+        .cloned()
+        .map(FpVar::from)
+        .collect::<Vec<_>>();
+    let powers = (0..64).map(|i| Fr::from(1u64 << i)).collect::<Vec<_>>();
+    let output = output_bits
+        .chunks_exact(64)
+        .map(|bits| {
+            bits.iter()
+                .zip(&powers)
+                .fold(FpVar::Constant(Fr::zero()), |acc, (bit, power)| {
+                    acc + bit * *power
+                })
+        })
+        .collect::<Vec<_>>();
 
     let r = derive_r_var(&output, log_instances);
     let after_output_binding = cs.num_constraints();
@@ -552,6 +629,18 @@ pub fn verify_witness_profile(
 pub fn make_witness(instances: usize) -> Witness {
     assert!(instances.is_power_of_two());
     let data = (0..instances * 25).map(|i| i as u64).collect::<Vec<_>>();
+    make_witness_from_data(&data)
+}
+
+pub fn proof_elements(instances: usize) -> usize {
+    assert!(instances.is_power_of_two());
+    6_255 + 554 * instances.ilog2() as usize
+}
+
+pub fn make_witness_from_data(data: &[u64]) -> Witness {
+    assert_eq!(data.len() % 25, 0);
+    let instances = data.len() / 25;
+    assert!(instances.is_power_of_two());
     let mut output = vec![0u64; instances * 25];
     for instance in 0..instances {
         let mut state: [u64; 25] = core::array::from_fn(|lane| data[instance * 25 + lane]);
@@ -561,8 +650,15 @@ pub fn make_witness(instances: usize) -> Witness {
         }
     }
     let r = derive_r_native(&output, instances.ilog2() as usize);
-    let (proof, input, proved_output) = gkr::keccacheck_og::prover::prove(&data, r);
+    let (proof_05, input, proved_output) = gkr::keccacheck_og::prover::prove(&data, r);
     assert_eq!(proved_output, output);
+    let proof = proof_05
+        .iter()
+        .map(|value| {
+            Fr::from_str(&value.to_string())
+                .expect("BN254 scalar converts across arkworks versions")
+        })
+        .collect();
     Witness {
         proof,
         input,
@@ -573,7 +669,7 @@ pub fn make_witness(instances: usize) -> Witness {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ark_relations::r1cs::ConstraintSystem;
+    use ark_relations::gr1cs::ConstraintSystem;
 
     #[test]
     fn one_permutation_proof_satisfies() {
@@ -603,5 +699,12 @@ mod tests {
         let cs = ConstraintSystem::<Fr>::new_ref();
         verify_witness(cs.clone(), &witness).unwrap();
         assert!(!cs.is_satisfied().unwrap());
+    }
+
+    #[test]
+    fn proof_length_formula_matches_native_prover() {
+        for instances in [1, 2, 4, 8, 16, 32, 64, 128] {
+            assert_eq!(make_witness(instances).proof.len(), proof_elements(instances));
+        }
     }
 }

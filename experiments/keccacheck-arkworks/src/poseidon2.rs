@@ -143,19 +143,24 @@ impl Default for SpongeVar {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ark_r1cs_std::{R1CSVar, alloc::AllocVar};
-    use ark_relations::r1cs::ConstraintSystem;
+    use ark_r1cs_std::{GR1CSVar, alloc::AllocVar};
+    use ark_relations::gr1cs::ConstraintSystem;
 
     #[test]
     fn permutation_matches_upstream_native() {
         let cs = ConstraintSystem::<Fr>::new_ref();
         let input: [Fr; 16] = core::array::from_fn(|i| Fr::from(i as u64));
-        let mut expected = input;
+        let mut expected: [ark_bn254_05::Fr; 16] =
+            core::array::from_fn(|i| ark_bn254_05::Fr::from(i as u64));
         gkr::poseidon::permute_16(&mut expected);
         let mut state: [FpVar<Fr>; 16] =
             core::array::from_fn(|i| FpVar::new_witness(cs.clone(), || Ok(input[i])).unwrap());
         permute_16(&mut state);
-        let got: Vec<Fr> = state.iter().map(|x| x.value().unwrap()).collect();
+        let got = state
+            .iter()
+            .map(|x| x.value().unwrap().to_string())
+            .collect::<Vec<_>>();
+        let expected = expected.iter().map(ToString::to_string).collect::<Vec<_>>();
         assert_eq!(got, expected);
         assert!(cs.is_satisfied().unwrap());
     }

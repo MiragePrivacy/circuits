@@ -5,7 +5,7 @@
 
 use ark_ff::PrimeField;
 use ark_r1cs_std::{alloc::AllocVar, boolean::Boolean};
-use ark_relations::r1cs::{ConstraintSystemRef, SynthesisError};
+use ark_relations::gr1cs::{ConstraintSystemRef, SynthesisError};
 
 pub type StateVar<F> = [[Boolean<F>; 64]; 25];
 
@@ -138,8 +138,8 @@ pub fn synthesize_batch<F: PrimeField>(
 mod tests {
     use super::*;
     use ark_bn254::Fr;
-    use ark_r1cs_std::R1CSVar;
-    use ark_relations::r1cs::ConstraintSystem;
+    use ark_r1cs_std::GR1CSVar;
+    use ark_relations::gr1cs::ConstraintSystem;
 
     #[test]
     fn direct_control_matches_mirage_cost() {

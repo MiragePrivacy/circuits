@@ -12,7 +12,9 @@ use std::path::PathBuf;
 
 use ark_bn254::Fr;
 use ark_relations::gr1cs::{ConstraintSynthesizer, ConstraintSystem};
-use mirage_relation::{Bounds, IntentOpening, ReceiptCircuit, StatementContext, Witness};
+use mirage_relation::{
+    Bounds, IntentOpening, KeccacheckReceiptCircuit, ReceiptCircuit, StatementContext, Witness,
+};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -198,6 +200,35 @@ fn satisfies_every_mainnet_fixture() {
         failed.join("\n  ")
     );
     eprintln!("all {} mainnet fixtures satisfied", d.fixtures.len());
+}
+
+/// Fast integration gate for the experimental batched-Keccak circuit. Use the
+/// deepest collected proof so branch/extension chaining is exercised without
+/// paying for 100 GKR satisfaction scans on every optimization iteration.
+#[test]
+fn keccacheck_satisfies_a_deep_mainnet_fixture() {
+    let Some(d) = load() else {
+        return;
+    };
+    let b = bounds(&d);
+    let fixture = d
+        .fixtures
+        .iter()
+        .max_by_key(|fixture| fixture.depth)
+        .expect("nonempty fixture set");
+    let cs = ConstraintSystem::<Fr>::new_ref();
+    KeccacheckReceiptCircuit::prove(b, witness(fixture))
+        .generate_constraints(cs.clone())
+        .expect("synthesis");
+    assert!(
+        cs.is_satisfied().unwrap_or(false),
+        "Keccacheck failed {} (block {}, tx {}, depth {}): {:?}",
+        fixture.tx_hash,
+        fixture.block_number,
+        fixture.tx_index,
+        fixture.depth,
+        cs.which_is_unsatisfied().ok().flatten()
+    );
 }
 
 /// The dataset must cover more than one shape, or it is not testing variety.

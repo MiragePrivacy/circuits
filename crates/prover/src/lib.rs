@@ -19,7 +19,7 @@ use ark_groth16::{Groth16, PreparedVerifyingKey, Proof, ProvingKey, VerifyingKey
 use ark_snark::SNARK;
 use ark_std::rand::SeedableRng;
 
-use mirage_relation::{Bounds, ReceiptCircuit, Witness};
+use mirage_relation::{Bounds, KeccacheckReceiptCircuit, ReceiptCircuit, Witness};
 
 /// A proving and verifying key pair for one circuit version.
 pub struct Keys {
@@ -47,6 +47,16 @@ pub fn setup(bounds: Bounds, seed: u64) -> Result<Keys, SettlementError> {
     let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(seed);
     let (pk, vk) =
         Groth16::<Bn254>::circuit_specific_setup(ReceiptCircuit::setup(bounds), &mut rng)
+            .map_err(|e| SettlementError::Setup(e.to_string()))?;
+    Ok(Keys { pk, vk })
+}
+
+/// Experimental setup for the relation whose Keccak-f calls are verified by
+/// the in-circuit Keccacheck batch verifier.
+pub fn setup_keccacheck(bounds: Bounds, seed: u64) -> Result<Keys, SettlementError> {
+    let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(seed);
+    let (pk, vk) =
+        Groth16::<Bn254>::circuit_specific_setup(KeccacheckReceiptCircuit::setup(bounds), &mut rng)
             .map_err(|e| SettlementError::Setup(e.to_string()))?;
     Ok(Keys { pk, vk })
 }
@@ -81,6 +91,36 @@ pub fn prove<R: ark_std::rand::RngCore + ark_std::rand::CryptoRng>(
         return Err(SettlementError::SelfCheck);
     }
 
+    Ok(Settlement {
+        proof: proof_points(&proof),
+        signals: [hi, lo],
+    })
+}
+
+/// Experimental proving path matching [`setup_keccacheck`]. The native GKR
+/// proof is generated in Rust while the Groth16 witness is synthesized.
+pub fn prove_keccacheck<R: ark_std::rand::RngCore + ark_std::rand::CryptoRng>(
+    keys: &Keys,
+    bounds: Bounds,
+    witness: &Witness,
+    rng: &mut R,
+) -> Result<Settlement, SettlementError> {
+    check_bounds(bounds, witness)?;
+    let (hi, lo) = mirage_relation::public_signals(witness);
+    let proof = Groth16::<Bn254>::prove(
+        &keys.pk,
+        KeccacheckReceiptCircuit::prove(bounds, witness.clone()),
+        rng,
+    )
+    .map_err(|e| SettlementError::Prove(e.to_string()))?;
+
+    let pvk = PreparedVerifyingKey::from(keys.vk.clone());
+    let ok =
+        Groth16::<Bn254>::verify_with_processed_vk(&pvk, &[Fr::from(hi), Fr::from(lo)], &proof)
+            .map_err(|e| SettlementError::Verify(e.to_string()))?;
+    if !ok {
+        return Err(SettlementError::SelfCheck);
+    }
     Ok(Settlement {
         proof: proof_points(&proof),
         signals: [hi, lo],

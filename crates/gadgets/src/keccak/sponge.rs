@@ -38,7 +38,7 @@ use ark_r1cs_std::select::CondSelectGadget;
 use ark_r1cs_std::uint8::UInt8;
 use ark_relations::gr1cs::SynthesisError;
 
-use super::permutation::{keccak_f1600, State};
+use super::permutation::{DirectPermutation, PermutationBackend, State};
 use super::{DELIM_KECCAK, RATE};
 use crate::bytes::{assert_zero_tail, prefix_mask};
 
@@ -97,12 +97,19 @@ fn squeeze_256<F: PrimeField>(st: &State<F>) -> [Byte<F>; 32] {
 /// offset, so this needs no selection logic and costs exactly
 /// `ceil((len + 1) / RATE)` permutations.
 pub fn keccak256_fixed<F: PrimeField>(input: &[Byte<F>]) -> Result<[Byte<F>; 32], SynthesisError> {
+    keccak256_fixed_with(input, &mut DirectPermutation)
+}
+
+pub fn keccak256_fixed_with<F: PrimeField, B: PermutationBackend<F>>(
+    input: &[Byte<F>],
+    backend: &mut B,
+) -> Result<[Byte<F>; 32], SynthesisError> {
     let mut st = empty_state::<F>();
 
     let full_blocks = input.len() / RATE;
     for b in 0..full_blocks {
         absorb_block(&mut st, &input[b * RATE..(b + 1) * RATE])?;
-        st = keccak_f1600(st)?;
+        st = backend.permute(st)?;
     }
 
     // Final partial block, with padding. The delimiter goes at the first free
@@ -120,7 +127,7 @@ pub fn keccak256_fixed<F: PrimeField>(input: &[Byte<F>]) -> Result<[Byte<F>; 32]
         }));
     }
     absorb_block(&mut st, &last)?;
-    st = keccak_f1600(st)?;
+    st = backend.permute(st)?;
 
     Ok(squeeze_256(&st))
 }
@@ -166,6 +173,15 @@ pub fn keccak256_var<F: PrimeField>(
     buf: &[UInt8<F>],
     len: &FpVar<F>,
     active: &Boolean<F>,
+) -> Result<[Byte<F>; 32], SynthesisError> {
+    keccak256_var_with(buf, len, active, &mut DirectPermutation)
+}
+
+pub fn keccak256_var_with<F: PrimeField, B: PermutationBackend<F>>(
+    buf: &[UInt8<F>],
+    len: &FpVar<F>,
+    active: &Boolean<F>,
+    backend: &mut B,
 ) -> Result<[Byte<F>; 32], SynthesisError> {
     let max = buf.len();
     let max_blocks = max / RATE + 1;
@@ -235,7 +251,7 @@ pub fn keccak256_var<F: PrimeField>(
     let mut states = Vec::with_capacity(max_blocks);
     for b in 0..max_blocks {
         absorb_block(&mut st, &msg_bytes[b * RATE..(b + 1) * RATE])?;
-        st = keccak_f1600(st)?;
+        st = backend.permute(st)?;
         states.push(st.clone());
     }
 
