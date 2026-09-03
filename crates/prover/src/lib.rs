@@ -141,6 +141,20 @@ pub fn prove_seeded(
     prove(keys, bounds, witness, &mut rng)
 }
 
+/// Experimental [`prove_keccacheck`] with deterministic proof randomness.
+///
+/// This exists for reproducible cross-repository fixtures and tests. Production
+/// settlements must call [`prove_keccacheck`] with fresh randomness.
+pub fn prove_keccacheck_seeded(
+    keys: &Keys,
+    bounds: Bounds,
+    witness: &Witness,
+    seed: u64,
+) -> Result<Settlement, SettlementError> {
+    let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(seed);
+    prove_keccacheck(keys, bounds, witness, &mut rng)
+}
+
 /// A proof and the two public signals it is bound to, ready for `collect`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settlement {
