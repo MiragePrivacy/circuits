@@ -2,6 +2,7 @@
 //!
 //! ```sh
 //! cargo run -p mirage-prover --release --bin export-verifier
+//! cargo run -p mirage-prover --release --bin export-verifier -- --keccachecheck
 //! ```
 //!
 //! Writes three artifacts to `contracts/`:
@@ -22,10 +23,12 @@ use std::path::PathBuf;
 
 use ark_bn254::Bn254;
 use ark_groth16::VerifyingKey;
+use ark_std::rand::SeedableRng;
 use taceo_groth16_sol::{SolidityVerifierConfig, SolidityVerifierContext};
 
 use mirage_relation::{fixture, Bounds};
 fn main() {
+    let keccachecheck = std::env::args().any(|arg| arg == "--keccachecheck");
     // CARGO_MANIFEST_DIR is `crates/prover`, so reaching the repo's
 
     // `contracts/` takes two levels up, not one.
@@ -40,7 +43,11 @@ fn main() {
     // rendered below is structurally identical either way, so the size and gas
     // measurements hold; only the key's provenance differs.
     eprintln!("setup...");
-    let keys = mirage_prover::setup(bounds, 0).expect("setup");
+    let keys = if keccachecheck {
+        mirage_prover::setup_keccacheck(bounds, 0).expect("Keccacheck setup")
+    } else {
+        mirage_prover::setup(bounds, 0).expect("setup")
+    };
 
     // The contract.
     eprintln!("rendering verifier...");
@@ -57,7 +64,13 @@ fn main() {
     // compiled. `prove` verifies natively before returning: a contract test
     // that fails is ambiguous unless the proof is known good.
     eprintln!("proving...");
-    let settlement = mirage_prover::prove_seeded(&keys, bounds, &witness, 0).expect("prove");
+    let settlement = if keccachecheck {
+        let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(0);
+        mirage_prover::prove_keccacheck(&keys, bounds, &witness, &mut rng)
+            .expect("Keccacheck prove")
+    } else {
+        mirage_prover::prove_seeded(&keys, bounds, &witness, 0).expect("prove")
+    };
     let [hi, lo] = settlement.signals;
 
     let json = proof_json(&settlement.proof, hi, lo, &witness);
