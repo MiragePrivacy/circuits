@@ -659,6 +659,13 @@ fn single_log_rejects_a_second_event() {
         !accepts::<super::log::Erc20SingleLog>(&r, 0, &TOKEN, &RECIPIENT, &amt),
         "the single-log variant accepted a receipt with a second event"
     );
+    // The fixed layout is the variant the relation wires, so it carries the
+    // same obligation. Its logs-list header is pinned to one 157-byte entry,
+    // which a second event cannot satisfy.
+    assert!(
+        !accepts::<super::log::Erc20FixedLayout>(&r, 0, &TOKEN, &RECIPIENT, &amt),
+        "the fixed layout accepted a receipt with a second event"
+    );
 }
 
 /// Both relations must agree on every single-log receipt, or the optimization

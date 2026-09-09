@@ -157,4 +157,58 @@ mod tests {
         assert_eq!(result.padded, 4);
         assert!(cs.is_satisfied().unwrap());
     }
+
+    /// A one-permutation batch is a distinct code path, and `padded` is a power
+    /// of two, so any caller doing a single permutation reaches it.
+    ///
+    /// With `log_instances == 0` the output challenge vector is empty, the
+    /// first sumcheck runs zero rounds, and the output claim reduces to a
+    /// linear combination of the claimed output words. That combination is
+    /// still transcript-derived and still feeds the round reduction, so it must
+    /// verify a genuine permutation and reject a forged output.
+    #[test]
+    fn a_single_permutation_batch_verifies() {
+        let cs = ConstraintSystem::new_ref();
+        let mut batch = KeccacheckBatch::new(cs.clone());
+        let _ = batch.permute(witness_state(cs.clone(), 7)).unwrap();
+        let result = batch.finish().unwrap();
+        assert_eq!(result.recorded, 1);
+        assert_eq!(result.padded, 1);
+        assert!(
+            cs.is_satisfied().unwrap(),
+            "genuine singleton batch rejected"
+        );
+    }
+
+    /// The same path must not accept an output that is not `keccak-f(input)`.
+    ///
+    /// Flipping one output bit after the batch is built leaves every constraint
+    /// in place and changes only the assignment, which is what a malicious
+    /// prover controls.
+    #[test]
+    fn a_single_permutation_batch_rejects_a_forged_output() {
+        let cs = ConstraintSystem::new_ref();
+        let mut batch = KeccacheckBatch::new(cs.clone());
+        let output = batch.permute(witness_state(cs.clone(), 7)).unwrap();
+        let _ = batch.finish().unwrap();
+        assert!(cs.is_satisfied().unwrap());
+
+        let Boolean::Var(bit) = output[0][0].clone() else {
+            panic!("output bit is not an allocated witness");
+        };
+        let index = bit.variable().index().unwrap();
+        let flipped = {
+            let assignment = &cs.borrow().unwrap().assignments.witness_assignment[index];
+            if assignment.is_zero() {
+                Fr::from(1u64)
+            } else {
+                Fr::zero()
+            }
+        };
+        cs.borrow_mut().unwrap().assignments.witness_assignment[index] = flipped;
+        assert!(
+            !cs.is_satisfied().unwrap(),
+            "singleton batch accepted an output bit that is not keccak-f(input)"
+        );
+    }
 }

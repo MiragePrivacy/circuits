@@ -16,6 +16,20 @@
 //! (12.5), the ERC-20 relation (12.6), and the statement hash (10.2).
 //!
 //! Not wired: the delayed-witness ancestry chain (12.7), which is step 5.
+//!
+//! # What this relation does not prove
+//!
+//! It proves a matching Transfer exists somewhere in the witness block, not
+//! that a particular transaction produced it: the MPT key is a free witness
+//! and no transaction identity reaches the statement. One on-chain Transfer
+//! therefore satisfies every live row whose intent shares
+//! `(token, recipient, amount)`, and the log's sender is unconstrained.
+//!
+//! That is closed by policy, not here: the nomad must never hold two live
+//! requests with identical intents. Settlement soundness depends on that
+//! invariant holding off-chain. See the "Carried by out-of-circuit policy"
+//! section of `experiments/keccacheck-arkworks/RESULTS.md` for the analysis
+//! and the alternatives if it stops being tenable.
 
 use ark_bn254::Fr;
 use ark_ff::PrimeField;
@@ -950,6 +964,73 @@ mod tests {
             witness,
             "batched Keccacheck accepted a header digest mismatch",
         );
+    }
+
+    /// The batched circuit is the one that would ship, so every mutation the
+    /// direct circuit rejects must also fail here.
+    ///
+    /// Deferring 38 permutations to one GKR batch changes how Keccak is
+    /// proved, not what the relation says. A mutation that the direct circuit
+    /// catches but the batched one accepts would mean the deferral dropped a
+    /// binding rather than only its cost.
+    #[test]
+    fn batched_keccacheck_rejects_every_direct_mutation() {
+        let cases: Vec<(&str, Witness)> = vec![
+            ("substituted recipient", {
+                let mut w = fixture::genuine();
+                w.intent.recipient = [0xee; 20];
+                w
+            }),
+            ("substituted amount", {
+                let mut w = fixture::genuine();
+                let mut smaller = [0u8; 32];
+                smaller[31] = 1;
+                w.intent.settlement_amount = smaller;
+                w
+            }),
+            ("commitment from another context", {
+                let mut w = fixture::genuine();
+                w.intent.instance_domain = [0xa1; 32];
+                w.intent.chain_id = 2;
+                w.intent.escrow = [0xa2; 20];
+                w.intent.request_id = [0xa3; 32];
+                w.intent.row_index = 7;
+                refresh_commitment(&mut w);
+                w
+            }),
+            ("native asset opening", {
+                let mut w = fixture::genuine();
+                w.intent.asset_kind = 0;
+                w.intent.settlement_token = [0u8; 20];
+                refresh_commitment(&mut w);
+                w
+            }),
+            ("block number not in the statement", {
+                let mut w = fixture::genuine();
+                w.statement.witness_block_number += 1;
+                w
+            }),
+            ("block at bondStartBlock", {
+                let mut w = fixture::genuine();
+                w.statement.bond_start_block = w.statement.witness_block_number;
+                w
+            }),
+            ("block after bondDeadline", {
+                let mut w = fixture::genuine();
+                w.statement.bond_deadline = w.statement.witness_block_number - 1;
+                w
+            }),
+            ("tampered receipt byte", {
+                let mut w = fixture::genuine();
+                let last = w.receipt.len() - 1;
+                w.receipt[last] ^= 1;
+                w
+            }),
+        ];
+
+        for (name, witness) in cases {
+            assert_rejected_batched(witness, &format!("batched circuit accepted: {name}"));
+        }
     }
 
     #[test]
