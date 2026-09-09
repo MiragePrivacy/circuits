@@ -27,7 +27,9 @@ use ark_r1cs_std::select::CondSelectGadget;
 use ark_r1cs_std::uint8::UInt8;
 use ark_relations::gr1cs::SynthesisError;
 
-use crate::bytes::{one_hot, select_byte_with, select_bytes, zero_like as zero_at};
+use crate::bytes::{
+    one_hot, one_hot_in_range, select_byte_with, select_bytes, zero_like as zero_at,
+};
 use crate::rlp::{cursor::Cursor, RlpDecoder};
 
 /// A branch node's child layout.
@@ -146,7 +148,7 @@ pub fn branch_child_offset<F: PrimeField>(
     nibble: &FpVar<F>,
     active: &Boolean<F>,
 ) -> Result<FpVar<F>, SynthesisError> {
-    let sel = one_hot(nibble, 16)?;
+    let sel = one_hot_in_range(nibble, 16, active)?;
     // Zip stops at the shortest, so a short branch would silently select over
     // fewer slots rather than failing. The selector must cover all sixteen.
     assert_eq!(branch.child_offset.len(), 16, "branch has sixteen children");

@@ -328,6 +328,15 @@ pub fn generate_constraints_with_backend<F: PrimeField, B: PermutationBackend<F>
     )?;
     profile(&cs, "intent commitment", &mut mark);
 
+    // This is the ERC-20 relation, so the opening must be an ERC-20 intent.
+    // A native opening forces `settlement_token` to zero, and the log walk
+    // then requires address(0) to have emitted a Transfer. That is
+    // unsatisfiable, but only because address(0) has no code. Pin the kind
+    // directly rather than resting on that.
+    opening.asset_kind.enforce_equal(&UInt8::constant(
+        mirage_gadgets::commitment::ASSET_KIND_ERC20,
+    ))?;
+
     // The commitment's deployment/request/row context must be the same
     // context whose statement hash the verifier checks. The commitment
     // hash alone only authenticates the opening internally.
@@ -796,6 +805,20 @@ mod tests {
         assert!(!cs.is_satisfied().unwrap(), "{message}");
     }
 
+    /// The ERC-20 relation must not accept a native-asset opening.
+    ///
+    /// A native opening forces `settlement_token` to zero, which the log walk
+    /// then requires address(0) to have emitted. That is unsatisfiable only
+    /// because address(0) has no code; the relation pins the kind directly.
+    #[test]
+    fn rejects_a_native_asset_opening() {
+        let mut w = fixture::genuine();
+        w.intent.asset_kind = 0;
+        w.intent.settlement_token = [0u8; 20];
+        refresh_commitment(&mut w);
+        assert_rejected(w, "accepted a native opening in the ERC-20 relation");
+    }
+
     /// The gap this closes: a prover must not be able to substitute the
     /// settlement details.
     ///
@@ -888,7 +911,7 @@ mod tests {
             "unsatisfied: {:?}",
             cs.which_is_unsatisfied()
         );
-        assert_eq!(cs.num_constraints(), 8_095_727);
+        assert_eq!(cs.num_constraints(), 8_097_183);
     }
 
     #[test]
@@ -911,7 +934,7 @@ mod tests {
         );
         assert_eq!(result.recorded, 38);
         assert_eq!(result.padded, 64);
-        assert_eq!(cs.num_constraints(), 4_034_927);
+        assert_eq!(cs.num_constraints(), 4_036_383);
         assert!(
             cs.is_satisfied().unwrap(),
             "unsatisfied: {:?}",
@@ -935,6 +958,6 @@ mod tests {
         KeccacheckReceiptCircuit::setup(Bounds::default())
             .generate_constraints(cs.clone())
             .unwrap();
-        assert_eq!(cs.num_constraints(), 4_034_927);
+        assert_eq!(cs.num_constraints(), 4_036_383);
     }
 }
