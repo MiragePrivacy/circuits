@@ -19,10 +19,10 @@ use ark_relations::gr1cs::SynthesisError;
 
 use super::constructed_leaf::hash_leaf_from_remainder_with;
 use super::node::{branch_child_offset, decode_branch, decode_short};
-use super::path::{assert_canonical_flags, assert_even_pad_is_zero, nibble_at, read_flags};
+use super::path::{assert_canonical_flags, assert_even_pad_is_zero, nibble_at_with, read_flags};
 use super::traverse::{assert_path_matches, bits_to_byte};
 use super::{MptVerifier, ProofNode};
-use crate::bytes::{one_hot, select_byte_with, select_bytes, zero_like};
+use crate::bytes::{one_hot_in_range, select_byte_with, select_bytes, zero_like};
 use crate::keccak::{keccak256_var_with, DirectPermutation, PermutationBackend};
 
 pub struct ConstructedLeafTraversal;
@@ -69,6 +69,12 @@ impl ConstructedLeafTraversal {
         nodes: &[ProofNode<F>],
         backend: &mut B,
     ) -> Result<(), SynthesisError> {
+        // Nibble reads past the key buffer return zero rather than failing, so
+        // an unbounded `key_len` lets the path consume nibbles the key does not
+        // have. The nibble reads are gated in range individually; this bounds
+        // the length they are measured against.
+        crate::bytes::assert_at_most(key_len, key.len(), &Boolean::TRUE)?;
+
         let mut expected = root.to_vec();
         let mut consumed = zero_like(key)?;
         let mut inactive_seen = Boolean::FALSE;
@@ -99,7 +105,7 @@ impl ConstructedLeafTraversal {
             // speculative short-node decoder and path machinery.
             if level_index == 0 {
                 let branch = decode_branch(&level.bytes, &level.len, &active)?;
-                let nibble = nibble_at(key, &consumed)?;
+                let nibble = nibble_at_with(key, &consumed, &active)?;
                 let child_offset = branch_child_offset(&branch, &nibble, &active)?;
                 let next_ref = select_bytes(&level.bytes, &child_offset, 32)?;
                 consumed =
@@ -134,11 +140,11 @@ impl ConstructedLeafTraversal {
             let short = decode_short(&level.bytes, &level.len, &short_active)?;
             profile(&level.bytes, "decoders", &mut mark);
 
-            let nibble = nibble_at(key, &consumed)?;
+            let nibble = nibble_at_with(key, &consumed, &branch_active)?;
             let child_offset = branch_child_offset(&branch, &nibble, &branch_active)?;
             profile(&level.bytes, "child-offset", &mut mark);
 
-            let first_sel = one_hot(&short.path_offset, level.bytes.len())?;
+            let first_sel = one_hot_in_range(&short.path_offset, level.bytes.len(), &short_active)?;
             let first = select_byte_with(&level.bytes, &first_sel)?;
             assert_canonical_flags(&first, &short_active)?;
             let flags = read_flags(&first)?;
@@ -309,6 +315,47 @@ mod tests {
         ConstructedLeafTraversal::verify_inclusion(
             &root, &key, &key_len, &value, &value_len, &nodes,
         )
+    }
+
+    /// A `key_len` past the key buffer must be rejected.
+    ///
+    /// Nibble reads past the buffer return zero rather than failing, so an
+    /// unbounded `key_len` let the path consume nibbles the key does not have.
+    /// The relation derives `key_len` from the witness, so this is only
+    /// constructible here.
+    #[test]
+    fn rejects_a_key_length_past_the_buffer() {
+        let p = genuine();
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        let root = alloc_bounded(cs.clone(), &p.root, 32).unwrap();
+        let key = alloc_bounded(cs.clone(), &p.key, 3).unwrap();
+        // The buffer holds three bytes; claim four.
+        let key_len = FpVar::new_witness(cs.clone(), || Ok(Fr::from(4u64))).unwrap();
+        let value = alloc_bounded(cs.clone(), &p.value, 448).unwrap();
+        let value_len =
+            FpVar::new_witness(cs.clone(), || Ok(Fr::from(p.value.len() as u64))).unwrap();
+
+        let ancestor_count = p.nodes.len().saturating_sub(1);
+        let mut nodes = Vec::with_capacity(3);
+        for i in 0..3 {
+            let (bytes, len, active) = match p.nodes.get(i).filter(|_| i < ancestor_count) {
+                Some(node) => (node.clone(), node.len(), true),
+                None => (Vec::new(), 0, false),
+            };
+            nodes.push(ProofNode {
+                bytes: alloc_bounded(cs.clone(), &bytes, 544).unwrap(),
+                len: FpVar::new_witness(cs.clone(), || Ok(Fr::from(len as u64))).unwrap(),
+                active: Boolean::new_witness(cs.clone(), || Ok(active)).unwrap(),
+            });
+        }
+        ConstructedLeafTraversal::verify_inclusion(
+            &root, &key, &key_len, &value, &value_len, &nodes,
+        )
+        .unwrap();
+        assert!(
+            !cs.is_satisfied().unwrap(),
+            "accepted a key length past the key buffer"
+        );
     }
 
     #[test]

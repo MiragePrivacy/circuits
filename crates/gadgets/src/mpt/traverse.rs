@@ -39,9 +39,9 @@ use ark_r1cs_std::uint8::UInt8;
 use ark_relations::gr1cs::SynthesisError;
 
 use super::node::{branch_child_offset, decode_branch, decode_short, is_branch};
-use super::path::{assert_canonical_flags, assert_even_pad_is_zero, nibble_at, read_flags};
+use super::path::{assert_canonical_flags, assert_even_pad_is_zero, nibble_at_with, read_flags};
 use super::{MptVerifier, ProofNode};
-use crate::bytes::{lt as less_than, one_hot, select_byte_with, select_bytes, zero_like};
+use crate::bytes::{lt as less_than, one_hot_in_range, select_byte_with, select_bytes, zero_like};
 use crate::keccak::keccak256_var;
 
 /// # Conditional enforcement: the rule this module exists to demonstrate
@@ -65,6 +65,22 @@ use crate::keccak::keccak256_var;
 ///
 /// The rule: **gate assertions about the caller's data; never gate a constraint
 /// that defines a witness.**
+///
+/// # The gap that rule left
+///
+/// Definitional constraints being ungated is right, but it does not follow that
+/// a definitional gadget needs no assertion *alongside* it. `one_hot` encodes
+/// an out-of-range index as the all-zero vector, so that vector is available
+/// for an in-range index too, and `select_byte_with` then reads zero. A prover
+/// suppresses a read the circuit believes it made. Range-constraining the index
+/// does not help: the suppressed read is at an in-range index.
+///
+/// So a read whose zero would satisfy something takes
+/// `bytes::one_hot_in_range` or `path::nibble_at_with`, which keep the
+/// definitional constraints ungated and add a gated "a hit did occur"
+/// assertion. Reads that are genuinely speculative still pass a false
+/// `active`: a path-match iteration past `path_nibbles`, or an unselected
+/// leaf layout.
 ///
 /// Cost is unaffected either way — `conditional_enforce_equal` costs what
 /// `enforce_equal` does.
@@ -171,12 +187,12 @@ impl<F: PrimeField> MptVerifier<F> for Traversal {
 
             // ---- branch case: follow the nibble's child (invariant 3) ----
             profile(&level.bytes, "decoders", &mut mark);
-            let nibble = nibble_at(key, &consumed)?;
+            let nibble = nibble_at_with(key, &consumed, &branch_active)?;
             let child_offset = branch_child_offset(&branch, &nibble, &branch_active)?;
 
             // ---- short case: read flags and match the path (invariant 4) ----
             profile(&level.bytes, "child-hash", &mut mark);
-            let first_sel = one_hot(&short.path_offset, level.bytes.len())?;
+            let first_sel = one_hot_in_range(&short.path_offset, level.bytes.len(), &short_active)?;
             let first = select_byte_with(&level.bytes, &first_sel)?;
             // These bind only for short nodes: on a branch, `path_offset` is
             // a child-reference prefix such as 0xa0, whose high bits are set by
@@ -341,16 +357,17 @@ pub(super) fn assert_path_matches<F: PrimeField>(
     for j in 0..max_path_nibbles {
         let jf = FpVar::constant(F::from(j as u64));
         let within = less_than(&jf, path_nibbles)?;
+        let bind = active.clone() & within;
 
         // Path nibble, read relative to the path field's start.
         let path_pos = &short.path_offset * FpVar::constant(F::from(2u64)) + &skip + &jf;
-        let from_path = nibble_at(node, &path_pos)?;
+        let from_path = nibble_at_with(node, &path_pos, &bind)?;
 
         // Key nibble.
         let key_pos = consumed + &jf;
-        let from_key = nibble_at(key, &key_pos)?;
+        let from_key = nibble_at_with(key, &key_pos, &bind)?;
 
-        from_path.conditional_enforce_equal(&from_key, &(active.clone() & within))?;
+        from_path.conditional_enforce_equal(&from_key, &bind)?;
     }
     Ok(())
 }

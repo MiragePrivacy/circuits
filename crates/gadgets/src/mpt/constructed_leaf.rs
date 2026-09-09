@@ -21,7 +21,7 @@ use ark_relations::gr1cs::SynthesisError;
 use crate::bytes::byte_to_field;
 use crate::keccak::sponge::Byte;
 use crate::keccak::{keccak256_var_with, DirectPermutation, PermutationBackend};
-use crate::mpt::path::nibble_at;
+use crate::mpt::path::nibble_at_with;
 
 /// Constructs and hashes `RLP([HP(key[consumed..], leaf), receipt])`.
 ///
@@ -70,6 +70,13 @@ pub fn hash_leaf_from_remainder_with<F: PrimeField, B: PermutationBackend<F>>(
     decode_u16(&receipt_hi, &receipt_low)?.conditional_enforce_equal(receipt_len, active)?;
     receipt_hi.conditional_enforce_equal(&UInt8::constant(1), active)?;
 
+    // The leaf buffer is wider than the receipt buffer, so bounding `leaf_len`
+    // alone permits a `receipt_len` that runs past the receipt's own bytes and
+    // absorbs the leaf's constant padding. That commits to a receipt this
+    // gadget never saw. The receipt relation happens to pin the length too, but
+    // a hash gadget must not depend on its caller for the extent it hashes.
+    crate::bytes::assert_at_most(receipt_len, receipt.len(), active)?;
+
     let total_nibbles = key_len * FpVar::constant(F::from(2u64));
     let remaining = &total_nibbles - consumed;
     let max_nibbles = key.len() * 2;
@@ -85,7 +92,12 @@ pub fn hash_leaf_from_remainder_with<F: PrimeField, B: PermutationBackend<F>>(
             &FpVar::constant(F::from(encoded_len as u64)),
             &path_item_len,
         )?;
-        layouts.push((selected, encoded_len, path_bytes(key, consumed, n, active)?));
+        let layout_active = active.clone() & selected.clone();
+        layouts.push((
+            selected,
+            encoded_len,
+            path_bytes(key, consumed, n, &layout_active)?,
+        ));
     }
     any_layout.conditional_enforce_equal(&Boolean::TRUE, active)?;
 
@@ -136,12 +148,21 @@ fn path_bytes<F: PrimeField>(
     if n % 2 == 0 {
         expressions.push(FpVar::constant(F::from(0x20u64)));
     } else {
-        expressions.push(FpVar::constant(F::from(0x30u64)) + nibble_at(key, consumed)?);
+        expressions
+            .push(FpVar::constant(F::from(0x30u64)) + nibble_at_with(key, consumed, active)?);
     }
     let mut j = n % 2;
     while j < n {
-        let high = nibble_at(key, &(consumed + FpVar::constant(F::from(j as u64))))?;
-        let low = nibble_at(key, &(consumed + FpVar::constant(F::from((j + 1) as u64))))?;
+        let high = nibble_at_with(
+            key,
+            &(consumed + FpVar::constant(F::from(j as u64))),
+            active,
+        )?;
+        let low = nibble_at_with(
+            key,
+            &(consumed + FpVar::constant(F::from((j + 1) as u64))),
+            active,
+        )?;
         expressions.push(high * FpVar::constant(F::from(16u64)) + low);
         j += 2;
     }
