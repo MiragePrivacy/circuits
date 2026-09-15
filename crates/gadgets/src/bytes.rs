@@ -87,6 +87,19 @@ pub fn prefix_mask<F: PrimeField>(
     Ok(sel)
 }
 
+/// Enforces `len <= n` when `active`, without the zero-tail requirement.
+///
+/// [`assert_zero_tail`] carries the same bound, so use this only where a length
+/// is checked against a buffer it is not itself the extent of.
+pub fn assert_at_most<F: PrimeField>(
+    len: &FpVar<F>,
+    n: usize,
+    active: &Boolean<F>,
+) -> Result<(), SynthesisError> {
+    let _ = prefix_mask(len, n, active)?;
+    Ok(())
+}
+
 /// Requires `buf[i] == 0` for every `i >= len`.
 ///
 /// This is the check that makes a bounded buffer safe to hash or parse.
@@ -138,6 +151,35 @@ pub fn one_hot<F: PrimeField>(idx: &FpVar<F>, n: usize) -> Result<Vec<Boolean<F>
     }
 
     enforce_one_hot(idx, &sel)?;
+    Ok(sel)
+}
+
+/// A one-hot indicator vector that must actually hit, when `active`.
+///
+/// [`one_hot`] alone permits the all-zero assignment for *any* index, because
+/// the all-zero vector is how an out-of-range index is encoded. That is the
+/// right default for a speculative read, and wrong wherever the caller knows
+/// the index is in range: a prover who claims out-of-range for an in-range
+/// index suppresses the read, and [`select_byte_with`] returns zero.
+///
+/// Suppressing a read is not the same as choosing an out-of-range index, and no
+/// range constraint on the index prevents it. Where a zero read would satisfy
+/// something, use this instead.
+///
+/// The hit assertion is separate from [`enforce_one_hot`] on purpose. That
+/// function's constraints define the indicators and must stay ungated; this one
+/// asserts a fact about the caller's data and is therefore gated.
+pub fn one_hot_in_range<F: PrimeField>(
+    idx: &FpVar<F>,
+    n: usize,
+    active: &Boolean<F>,
+) -> Result<Vec<Boolean<F>>, SynthesisError> {
+    let sel = one_hot(idx, n)?;
+    let mut sum = FpVar::zero();
+    for bit in &sel {
+        sum += FpVar::from(bit.clone());
+    }
+    sum.conditional_enforce_equal(&FpVar::one(), active)?;
     Ok(sel)
 }
 

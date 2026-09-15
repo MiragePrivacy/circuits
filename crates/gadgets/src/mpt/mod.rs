@@ -36,6 +36,8 @@
 //! Every one of those is a place where a missing constraint lets a prover
 //! present an unrelated node. The adversarial suite in [`tests`] names each.
 
+pub mod constructed_leaf;
+pub mod constructed_traverse;
 #[cfg(test)]
 pub mod harness;
 pub mod node;

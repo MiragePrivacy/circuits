@@ -143,7 +143,9 @@ fn derived_constants_match_the_exported_verifier() {
         out
     };
 
-    let c = mirage_prover::verifying_key_constants(&keys().vk);
+    // The checked-in ERC-20 verifier uses the optimized Keccacheck backend.
+    let optimized = mirage_prover::setup_keccacheck(Bounds::default(), 0).expect("Keccacheck setup");
+    let c = mirage_prover::verifying_key_constants(&optimized.vk);
     for (i, (x, y)) in [
         ("CONSTANT_X", "CONSTANT_Y"),
         ("PUB_0_X", "PUB_0_Y"),

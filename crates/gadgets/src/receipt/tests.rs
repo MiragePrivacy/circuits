@@ -576,6 +576,65 @@ fn single_log_adversarial_suite() {
     run_forgeries::<R>();
 }
 
+/// The finite-layout implementation must preserve the complete single-log
+/// relation, including every adversarial rejection case.
+#[test]
+fn fixed_layout_adversarial_suite() {
+    use super::log::Erc20FixedLayout as R;
+    accepts_genuine_receipt::<R>();
+    accepts_every_supported_envelope::<R>();
+    accepts_any_sender::<R>();
+    run_forgeries::<R>();
+}
+
+#[test]
+fn fixed_layout_accepts_every_gas_width() {
+    let amt = amount(77);
+    let log = transfer_log(&TOKEN, &SENDER, &RECIPIENT, &amt);
+    for gas_total in 1usize..=9 {
+        let encoded_gas = if gas_total == 1 {
+            vec![0x7f] // canonical bare byte
+        } else {
+            let width = gas_total - 1;
+            let mut item = vec![0x80 + width as u8];
+            item.push(if width == 1 { 0x80 } else { 0x01 });
+            item.resize(gas_total, 0);
+            item
+        };
+        let payload = enc_list(&[
+            enc_str(&[1]),
+            encoded_gas,
+            enc_str(&[0u8; 256]),
+            enc_list(std::slice::from_ref(&log)),
+        ]);
+        for envelope in [None, Some(1u8), Some(2), Some(3), Some(4)] {
+            let mut receipt = envelope.into_iter().collect::<Vec<_>>();
+            receipt.extend_from_slice(&payload);
+            assert!(
+                accepts_genuine_intent::<super::log::Erc20FixedLayout>(&receipt, 0, &amt),
+                "rejected gas width {gas_total}, envelope {envelope:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn fixed_layout_rejects_nonminimal_one_byte_gas() {
+    let amt = amount(77);
+    let log = transfer_log(&TOKEN, &SENDER, &RECIPIENT, &amt);
+    let payload = enc_list(&[
+        enc_str(&[1]),
+        vec![0x81, 0x7f], // must be encoded as bare 0x7f
+        enc_str(&[0u8; 256]),
+        enc_list(&[log]),
+    ]);
+    let mut receipt = vec![0x02];
+    receipt.extend_from_slice(&payload);
+    assert!(!accepts_genuine_intent::<super::log::Erc20FixedLayout>(
+        &receipt, 0, &amt
+    ));
+}
+
 /// The narrowing the variant trades for its saving: a receipt with a second
 /// event must be rejected, where the general relation accepts it.
 ///
@@ -599,6 +658,13 @@ fn single_log_rejects_a_second_event() {
     assert!(
         !accepts::<super::log::Erc20SingleLog>(&r, 0, &TOKEN, &RECIPIENT, &amt),
         "the single-log variant accepted a receipt with a second event"
+    );
+    // The fixed layout is the variant the relation wires, so it carries the
+    // same obligation. Its logs-list header is pinned to one 157-byte entry,
+    // which a second event cannot satisfy.
+    assert!(
+        !accepts::<super::log::Erc20FixedLayout>(&r, 0, &TOKEN, &RECIPIENT, &amt),
+        "the fixed layout accepted a receipt with a second event"
     );
 }
 

@@ -7,7 +7,7 @@ members = [
     "crates/prover",
     "crates/fixtures",
 ]
-exclude = ["bench-arkworks"]
+exclude = ["bench-arkworks", "experiments/keccacheck-arkworks"]
 
 [workspace.package]
 version = "0.1.0"

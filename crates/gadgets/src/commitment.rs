@@ -51,8 +51,8 @@ use ark_r1cs_std::eq::EqGadget;
 use ark_r1cs_std::uint8::UInt8;
 use ark_relations::gr1cs::SynthesisError;
 
-use crate::keccak::keccak256_fixed;
 use crate::keccak::sponge::to_bytes;
+use crate::keccak::{keccak256_fixed_with, DirectPermutation, PermutationBackend};
 
 /// Byte width of the spec 8.3 preimage.
 pub const PREIMAGE_LEN: usize = 226;
@@ -139,9 +139,18 @@ pub fn open<F: PrimeField>(
     commitment: &[UInt8<F>],
     active: &Boolean<F>,
 ) -> Result<(), SynthesisError> {
+    open_with(opening, commitment, active, &mut DirectPermutation)
+}
+
+pub fn open_with<F: PrimeField, B: PermutationBackend<F>>(
+    opening: &Opening<F>,
+    commitment: &[UInt8<F>],
+    active: &Boolean<F>,
+    backend: &mut B,
+) -> Result<(), SynthesisError> {
     assert_eq!(commitment.len(), 32, "commitment must be 32 bytes");
 
-    let digest_bits = keccak256_fixed(&to_bytes(&opening.preimage())?)?;
+    let digest_bits = keccak256_fixed_with(&to_bytes(&opening.preimage())?, backend)?;
     for (bits, want) in digest_bits.iter().zip(commitment.iter()) {
         UInt8::from_bits_le(bits).conditional_enforce_equal(want, active)?;
     }
