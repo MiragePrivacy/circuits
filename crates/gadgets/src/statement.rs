@@ -33,8 +33,8 @@ use ark_r1cs_std::uint8::UInt8;
 use ark_relations::gr1cs::SynthesisError;
 
 use crate::bytes::pack_bytes_16;
-use crate::keccak::keccak256_fixed;
 use crate::keccak::sponge::to_bytes;
+use crate::keccak::{keccak256_fixed_with, DirectPermutation, PermutationBackend};
 
 /// Byte width of the spec 10.2 preimage.
 pub const PREIMAGE_LEN: usize = 285;
@@ -124,8 +124,15 @@ pub struct Signals<F: PrimeField> {
 /// values. Splitting it that way keeps the public-input decision in the
 /// relation, where the spec 10.1 argument for exactly two signals lives.
 pub fn compute<F: PrimeField>(ctx: &Context<F>) -> Result<Signals<F>, SynthesisError> {
+    compute_with(ctx, &mut DirectPermutation)
+}
+
+pub fn compute_with<F: PrimeField, B: PermutationBackend<F>>(
+    ctx: &Context<F>,
+    backend: &mut B,
+) -> Result<Signals<F>, SynthesisError> {
     let preimage = ctx.preimage();
-    let digest_bits = keccak256_fixed(&to_bytes(&preimage)?)?;
+    let digest_bits = keccak256_fixed_with(&to_bytes(&preimage)?, backend)?;
 
     // The digest as 32 bytes, then split into two 16-byte limbs. 16 bytes is
     // always below the BN254 modulus, so each packing is injective; 32 would

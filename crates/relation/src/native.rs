@@ -110,7 +110,14 @@ pub struct NativeBounds {
 
 impl Default for NativeBounds {
     fn default() -> Self {
-        let common = Bounds::default();
+        // Freeze the native circuit shape independently of ERC-20 optimizations.
+        let common = Bounds {
+            node_bytes: 544,
+            key_bytes: 3,
+            receipt_bytes: 512,
+            header_bytes: 704,
+            depth: 4,
+        };
         Self {
             transaction_bytes: 512,
             transaction_node_bytes: common.node_bytes,
@@ -518,6 +525,8 @@ mod tests {
         NativeCircuit::prove(NativeBounds::default(), w)
             .generate_constraints(cs.clone())
             .unwrap();
+        // Match the prover: inline symbolic expressions before evaluating them.
+        cs.finalize();
         cs.is_satisfied().unwrap()
     }
 
@@ -670,6 +679,7 @@ mod tests {
             .generate_constraints(cs.clone())
             .unwrap();
         println!("  native relation: {} constraints", cs.num_constraints());
+        cs.finalize();
         assert!(cs.is_satisfied().unwrap());
     }
 }
