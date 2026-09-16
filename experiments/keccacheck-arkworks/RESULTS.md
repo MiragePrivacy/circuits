@@ -200,3 +200,14 @@ public input and a linkable per-settlement tag). If `transactionIndex` is ever
 bound, note that the one-hot in-range assertions in `b5192b4` are what make
 that binding meaningful: without them a prover could suppress a key nibble read
 and prove a genuine receipt at a fabricated index.
+
+## Native ETH integration
+
+The native dual-trie relation now batches all 51 permutations into one private
+64-way Keccacheck proof. At unchanged bounds it falls from 17,635,451 to
+11,620,286 constraints. A sequential three-proof host comparison measured
+44.871 s direct versus 45.439 s Keccacheck median proving, with peak process
+RSS falling from 27.272 to 24.831 GiB and the uncompressed key from 7.168 to
+4.378 GiB. This port reduces constraints and memory, but the sample shows no
+proving-time improvement because GKR expression inlining offsets the savings.
+See [native implementation, validation, and full benchmark](../../NATIVE_ETH_STACK.md).
