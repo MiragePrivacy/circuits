@@ -42,7 +42,7 @@ use super::node::{branch_child_offset, decode_branch, decode_short, is_branch};
 use super::path::{assert_canonical_flags, assert_even_pad_is_zero, nibble_at_with, read_flags};
 use super::{MptVerifier, ProofNode};
 use crate::bytes::{lt as less_than, one_hot_in_range, select_byte_with, select_bytes, zero_like};
-use crate::keccak::keccak256_var;
+use crate::keccak::{keccak256_var_with, DirectPermutation, PermutationBackend};
 
 /// # Conditional enforcement: the rule this module exists to demonstrate
 ///
@@ -123,6 +123,30 @@ impl<F: PrimeField> MptVerifier<F> for Traversal {
         value_len: &FpVar<F>,
         nodes: &[ProofNode<F>],
     ) -> Result<(), SynthesisError> {
+        Self::verify_inclusion_with(
+            root,
+            key,
+            key_len,
+            value,
+            value_len,
+            nodes,
+            &mut DirectPermutation,
+        )
+    }
+}
+
+impl Traversal {
+    /// Verify every node hash with a caller-owned permutation backend.
+    /// One backend may collect hashes from multiple tries into the same batch.
+    pub fn verify_inclusion_with<F: PrimeField, B: PermutationBackend<F>>(
+        root: &[UInt8<F>],
+        key: &[UInt8<F>],
+        key_len: &FpVar<F>,
+        value: &[UInt8<F>],
+        value_len: &FpVar<F>,
+        nodes: &[ProofNode<F>],
+        backend: &mut B,
+    ) -> Result<(), SynthesisError> {
         // What the next node's hash must equal. Starts as the claimed root
         // (invariant 1) and is replaced at each level by the selected child
         // reference (invariant 2).
@@ -163,7 +187,7 @@ impl<F: PrimeField> MptVerifier<F> for Traversal {
             // Computed unconditionally: an inactive slot has zero length and
             // hashes to the empty-input digest, which will not match, so the
             // comparison is gated on `active` rather than the hash itself.
-            let digest = keccak256_var(&level.bytes, &level.len, &active)?;
+            let digest = keccak256_var_with(&level.bytes, &level.len, &active, backend)?;
             for (d, e) in digest.iter().zip(expected.iter()) {
                 let d_byte = bits_to_byte(d)?;
                 d_byte.conditional_enforce_equal(e, &active)?;

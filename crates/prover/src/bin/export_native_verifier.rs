@@ -43,8 +43,8 @@ fn main() {
     // spec 18.2 requires a multiparty Phase 2 producing the same artifact
     // soundly. The verifier rendered below is structurally identical either
     // way, so size and gas measurements hold; only the key's provenance differs.
-    eprintln!("setup (native, ~17.8M constraints)...");
-    let keys = mirage_prover::native::setup(bounds, 0).expect("setup");
+    eprintln!("setup (native Keccacheck)...");
+    let keys = mirage_prover::native::setup_keccacheck(bounds, 0).expect("setup");
 
     eprintln!("rendering verifier...");
     let contract = render(&keys.vk);
@@ -61,7 +61,7 @@ fn main() {
     // that fails is ambiguous unless the proof is known good.
     eprintln!("proving...");
     let settlement =
-        mirage_prover::native::prove_seeded(&keys, bounds, &witness, 0).expect("prove");
+        mirage_prover::native::prove_keccacheck_seeded(&keys, bounds, &witness, 0).expect("prove");
     let [hi, lo] = settlement.signals;
 
     std::fs::write(

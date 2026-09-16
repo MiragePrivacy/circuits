@@ -50,6 +50,7 @@
 //!
 //! Until then this is testnet-only for the same class of reason step 2 is.
 
+use ark_bn254::Fr;
 use ark_ff::PrimeField;
 use ark_r1cs_std::alloc::AllocVar;
 use ark_r1cs_std::boolean::Boolean;
@@ -61,7 +62,8 @@ use ark_relations::gr1cs::{ConstraintSynthesizer, ConstraintSystemRef, Synthesis
 use mirage_gadgets::bytes::alloc_bounded;
 use mirage_gadgets::commitment::ASSET_KIND_NATIVE;
 use mirage_gadgets::header;
-use mirage_gadgets::mpt::{traverse::Traversal, MptVerifier, ProofNode};
+use mirage_gadgets::keccak::{DirectPermutation, PermutationBackend};
+use mirage_gadgets::mpt::{traverse::Traversal, ProofNode};
 use mirage_gadgets::receipt::envelope;
 use mirage_gadgets::statement;
 use mirage_gadgets::transaction::{NativeIntent, NativeTransfer, TransactionRelation};
@@ -78,9 +80,8 @@ pub const MEASUREMENT_SCOPE: &str =
 
 /// Compiled bounds for the native build.
 ///
-/// The receipt-side bounds are inherited from the ERC-20 relation, which
-/// measured them against 100 mainnet blocks. The two new ones are the
-/// transaction buffer and the transaction trie's node bound.
+/// Native bounds are frozen independently of the optimized ERC-20 relation.
+/// They bound both trie walks and the transaction and receipt parsers.
 #[derive(Clone, Copy)]
 pub struct NativeBounds {
     /// Receipt-trie and shared bounds.
@@ -206,141 +207,194 @@ fn alloc_nodes<F: PrimeField>(
 
 impl<F: PrimeField> ConstraintSynthesizer<F> for NativeCircuit {
     fn generate_constraints(self, cs: ConstraintSystemRef<F>) -> Result<(), SynthesisError> {
-        let b = self.bounds;
-        let w = self.w();
+        generate_constraints_with_backend(self, cs, &mut DirectPermutation)
+    }
+}
 
-        // ---- public inputs ----
-        //
-        // Exactly two, as in the ERC-20 relation: the statement hash's 128-bit
-        // limbs. Keeping the same public-input shape means the escrow's
-        // verifier call site is identical for both asset kinds.
-        let (want_hi, want_lo) = native_signals(&w.statement);
-        let public_hi = FpVar::new_input(cs.clone(), || Ok(F::from(want_hi)))?;
-        let public_lo = FpVar::new_input(cs.clone(), || Ok(F::from(want_lo)))?;
+/// Native dual-trie relation with all Keccak-f permutations authenticated by
+/// one private GKR batch inside the externally verified Groth16 proof.
+#[derive(Clone)]
+pub struct KeccacheckNativeCircuit(pub NativeCircuit);
 
-        // ---- witness allocation ----
-        let header_bytes = alloc_bounded(cs.clone(), &w.header, b.common.header_bytes)?;
-        let header_len = FpVar::new_witness(cs.clone(), || Ok(F::from(w.header.len() as u64)))?;
+impl KeccacheckNativeCircuit {
+    pub fn setup(bounds: NativeBounds) -> Self {
+        Self(NativeCircuit::setup(bounds))
+    }
 
-        // One key, both tries. The transaction and its receipt sit at the same
-        // index in their respective tries, which is what makes the two proofs
-        // about the same transaction rather than two unrelated ones.
-        let key = alloc_bounded(cs.clone(), &w.key, b.common.key_bytes)?;
-        let key_len = FpVar::new_witness(cs.clone(), || Ok(F::from(w.key.len() as u64)))?;
+    pub fn prove(bounds: NativeBounds, witness: NativeWitness) -> Self {
+        Self(NativeCircuit::prove(bounds, witness))
+    }
+}
 
-        let transaction = alloc_bounded(cs.clone(), &w.transaction, b.transaction_bytes)?;
-        let transaction_len =
-            FpVar::new_witness(cs.clone(), || Ok(F::from(w.transaction.len() as u64)))?;
-
-        let receipt = alloc_bounded(cs.clone(), &w.receipt, b.common.receipt_bytes)?;
-        let receipt_len = FpVar::new_witness(cs.clone(), || Ok(F::from(w.receipt.len() as u64)))?;
-
-        let transaction_nodes = alloc_nodes(
-            cs.clone(),
-            &w.transaction_nodes,
-            b.transaction_depth,
-            b.transaction_node_bytes,
-        )?;
-        let receipt_nodes = alloc_nodes(
-            cs.clone(),
-            &w.receipt_nodes,
-            b.common.depth,
-            b.common.node_bytes,
-        )?;
-
-        let opening = alloc_opening(cs.clone(), &w.intent)?;
-        let ctx = alloc_statement(cs.clone(), &w.statement)?;
-        let intent = NativeIntent {
-            recipient: opening.recipient.clone(),
-            amount: opening.settlement_amount.clone(),
-        };
-
-        // ---- the relation ----
-
-        // The commitment is the escrow's stored value, carried into the
-        // statement hash and therefore into the public signals. Opening it is
-        // what turns "some ETH moved" into "the payment this escrow committed
-        // to happened".
-        mirage_gadgets::commitment::open(&opening, &ctx.intent_commitment, &Boolean::TRUE)?;
-
-        // This circuit proves native settlements only. `open` already enforces
-        // that a native row's token is all-zero, but nothing in it fixes *which*
-        // kind this is: without this the ERC-20 verification key and the native
-        // one would each accept the other's asset kind, and an escrow holding a
-        // token row could be collected by proving an ETH transfer of the same
-        // amount to the same recipient.
-        opening
-            .asset_kind
-            .enforce_equal(&UInt8::constant(ASSET_KIND_NATIVE))?;
-
-        // The commitment's deployment/request/row context must be the same
-        // context whose statement hash the verifier checks.
-        enforce_bytes_equal(&opening.instance_domain, &ctx.instance_domain)?;
-        enforce_bytes_equal(&opening.chain_id, &ctx.chain_id)?;
-        enforce_bytes_equal(&opening.escrow, &ctx.escrow)?;
-        enforce_bytes_equal(&opening.request_id, &ctx.request_id)?;
-        enforce_bytes_equal(&opening.row_index, &ctx.row_index)?;
-
-        // The header supplies both roots rather than the caller. Accepting
-        // caller-supplied roots would let a prover invent tries containing
-        // whatever it liked.
-        let parsed = header::parse(&header_bytes, &header_len, &Boolean::TRUE)?;
-
-        // Authenticate the header itself: parsing roots out of it is not useful
-        // unless it is the exact witness block the verifier selected.
-        let header_digest =
-            mirage_gadgets::keccak::keccak256_var(&header_bytes, &header_len, &Boolean::TRUE)?;
-        for (got, want) in header_digest.iter().zip(ctx.witness_block_hash.iter()) {
-            UInt8::from_bits_le(got).enforce_equal(want)?;
+impl ConstraintSynthesizer<Fr> for KeccacheckNativeCircuit {
+    fn generate_constraints(self, cs: ConstraintSystemRef<Fr>) -> Result<(), SynthesisError> {
+        let mut batch = mirage_keccacheck_arkworks::batch::KeccacheckBatch::new(cs.clone());
+        generate_constraints_with_backend(self.0, cs.clone(), &mut batch)?;
+        let before = cs.num_constraints();
+        let result = batch.finish()?;
+        if std::env::var_os("RELATION_PROFILE").is_some() {
+            eprintln!(
+                "native Keccacheck verifier: {} constraints ({} -> {} permutations)",
+                cs.num_constraints() - before,
+                result.recorded,
+                result.padded
+            );
         }
-        let witness_number = fixed_be_value(&ctx.witness_block_number)?;
-        parsed.number.enforce_equal(&witness_number)?;
-
-        // Settlement is valid only in the half-open/closed lease interval:
-        // bondStartBlock < txBlockNumber <= bondDeadline.
-        let bond_start = fixed_be_value(&ctx.bond_start_block)?;
-        let bond_deadline = fixed_be_value(&ctx.bond_deadline)?;
-        lt_u64(&bond_start, &parsed.number)?.enforce_equal(&Boolean::TRUE)?;
-        lt_u64(&bond_deadline, &parsed.number)?.enforce_equal(&Boolean::FALSE)?;
-
-        // Trie one: the transaction is at `key` under `transactionsRoot`. This
-        // binds the exact bytes the transfer relation then reads.
-        Traversal::verify_inclusion(
-            &parsed.transactions_root,
-            &key,
-            &key_len,
-            &transaction,
-            &transaction_len,
-            &transaction_nodes,
-        )?;
-
-        // Trie two: the receipt is at the *same* key under `receiptsRoot`.
-        // Sharing the key is what makes this the settling transaction's own
-        // receipt rather than some other successful transaction's.
-        Traversal::verify_inclusion(
-            &parsed.receipts_root,
-            &key,
-            &key_len,
-            &receipt,
-            &receipt_len,
-            &receipt_nodes,
-        )?;
-
-        // The transaction pays the committed recipient the committed amount.
-        NativeTransfer::verify(&transaction, &transaction_len, &intent, &Boolean::TRUE)?;
-
-        // And it succeeded. `envelope::parse` enforces `status == 1` along with
-        // the canonical four-item payload; the logs it returns are ignored,
-        // because a native transfer emits none and a call carrying value may
-        // emit any.
-        envelope::parse(&receipt, &receipt_len, &Boolean::TRUE)?;
-
-        // ---- statement hash ----
-        let signals = statement::compute(&ctx)?;
-        statement::enforce(&signals, &public_hi, &public_lo, &Boolean::TRUE)?;
-
         Ok(())
     }
+}
+
+/// Synthesize the native relation with one shared Keccak backend for both tries.
+pub fn generate_constraints_with_backend<F: PrimeField, B: PermutationBackend<F>>(
+    circuit: NativeCircuit,
+    cs: ConstraintSystemRef<F>,
+    backend: &mut B,
+) -> Result<(), SynthesisError> {
+    let b = circuit.bounds;
+    let w = circuit.w();
+
+    // ---- public inputs ----
+    //
+    // Exactly two, as in the ERC-20 relation: the statement hash's 128-bit
+    // limbs. Keeping the same public-input shape means the escrow's
+    // verifier call site is identical for both asset kinds.
+    let (want_hi, want_lo) = native_signals(&w.statement);
+    let public_hi = FpVar::new_input(cs.clone(), || Ok(F::from(want_hi)))?;
+    let public_lo = FpVar::new_input(cs.clone(), || Ok(F::from(want_lo)))?;
+
+    // ---- witness allocation ----
+    let header_bytes = alloc_bounded(cs.clone(), &w.header, b.common.header_bytes)?;
+    let header_len = FpVar::new_witness(cs.clone(), || Ok(F::from(w.header.len() as u64)))?;
+
+    // One key, both tries. The transaction and its receipt sit at the same
+    // index in their respective tries, which is what makes the two proofs
+    // about the same transaction rather than two unrelated ones.
+    let key = alloc_bounded(cs.clone(), &w.key, b.common.key_bytes)?;
+    let key_len = FpVar::new_witness(cs.clone(), || Ok(F::from(w.key.len() as u64)))?;
+
+    let transaction = alloc_bounded(cs.clone(), &w.transaction, b.transaction_bytes)?;
+    let transaction_len =
+        FpVar::new_witness(cs.clone(), || Ok(F::from(w.transaction.len() as u64)))?;
+
+    let receipt = alloc_bounded(cs.clone(), &w.receipt, b.common.receipt_bytes)?;
+    let receipt_len = FpVar::new_witness(cs.clone(), || Ok(F::from(w.receipt.len() as u64)))?;
+
+    let transaction_nodes = alloc_nodes(
+        cs.clone(),
+        &w.transaction_nodes,
+        b.transaction_depth,
+        b.transaction_node_bytes,
+    )?;
+    let receipt_nodes = alloc_nodes(
+        cs.clone(),
+        &w.receipt_nodes,
+        b.common.depth,
+        b.common.node_bytes,
+    )?;
+
+    let opening = alloc_opening(cs.clone(), &w.intent)?;
+    let ctx = alloc_statement(cs.clone(), &w.statement)?;
+    let intent = NativeIntent {
+        recipient: opening.recipient.clone(),
+        amount: opening.settlement_amount.clone(),
+    };
+
+    // ---- the relation ----
+
+    // The commitment is the escrow's stored value, carried into the
+    // statement hash and therefore into the public signals. Opening it is
+    // what turns "some ETH moved" into "the payment this escrow committed
+    // to happened".
+    mirage_gadgets::commitment::open_with(
+        &opening,
+        &ctx.intent_commitment,
+        &Boolean::TRUE,
+        backend,
+    )?;
+
+    // This circuit proves native settlements only. `open` already enforces
+    // that a native row's token is all-zero, but nothing in it fixes *which*
+    // kind this is: without this the ERC-20 verification key and the native
+    // one would each accept the other's asset kind, and an escrow holding a
+    // token row could be collected by proving an ETH transfer of the same
+    // amount to the same recipient.
+    opening
+        .asset_kind
+        .enforce_equal(&UInt8::constant(ASSET_KIND_NATIVE))?;
+
+    // The commitment's deployment/request/row context must be the same
+    // context whose statement hash the verifier checks.
+    enforce_bytes_equal(&opening.instance_domain, &ctx.instance_domain)?;
+    enforce_bytes_equal(&opening.chain_id, &ctx.chain_id)?;
+    enforce_bytes_equal(&opening.escrow, &ctx.escrow)?;
+    enforce_bytes_equal(&opening.request_id, &ctx.request_id)?;
+    enforce_bytes_equal(&opening.row_index, &ctx.row_index)?;
+
+    // The header supplies both roots rather than the caller. Accepting
+    // caller-supplied roots would let a prover invent tries containing
+    // whatever it liked.
+    let parsed = header::parse(&header_bytes, &header_len, &Boolean::TRUE)?;
+
+    // Authenticate the header itself: parsing roots out of it is not useful
+    // unless it is the exact witness block the verifier selected.
+    let header_digest = mirage_gadgets::keccak::keccak256_var_with(
+        &header_bytes,
+        &header_len,
+        &Boolean::TRUE,
+        backend,
+    )?;
+    for (got, want) in header_digest.iter().zip(ctx.witness_block_hash.iter()) {
+        UInt8::from_bits_le(got).enforce_equal(want)?;
+    }
+    let witness_number = fixed_be_value(&ctx.witness_block_number)?;
+    parsed.number.enforce_equal(&witness_number)?;
+
+    // Settlement is valid only in the half-open/closed lease interval:
+    // bondStartBlock < txBlockNumber <= bondDeadline.
+    let bond_start = fixed_be_value(&ctx.bond_start_block)?;
+    let bond_deadline = fixed_be_value(&ctx.bond_deadline)?;
+    lt_u64(&bond_start, &parsed.number)?.enforce_equal(&Boolean::TRUE)?;
+    lt_u64(&bond_deadline, &parsed.number)?.enforce_equal(&Boolean::FALSE)?;
+
+    // Trie one: the transaction is at `key` under `transactionsRoot`. This
+    // binds the exact bytes the transfer relation then reads.
+    Traversal::verify_inclusion_with(
+        &parsed.transactions_root,
+        &key,
+        &key_len,
+        &transaction,
+        &transaction_len,
+        &transaction_nodes,
+        backend,
+    )?;
+
+    // Trie two: the receipt is at the *same* key under `receiptsRoot`.
+    // Sharing the key is what makes this the settling transaction's own
+    // receipt rather than some other successful transaction's.
+    Traversal::verify_inclusion_with(
+        &parsed.receipts_root,
+        &key,
+        &key_len,
+        &receipt,
+        &receipt_len,
+        &receipt_nodes,
+        backend,
+    )?;
+
+    // The transaction pays the committed recipient the committed amount.
+    NativeTransfer::verify(&transaction, &transaction_len, &intent, &Boolean::TRUE)?;
+
+    // And it succeeded. `envelope::parse` enforces `status == 1` along with
+    // the canonical four-item payload; the logs it returns are ignored,
+    // because a native transfer emits none and a call carrying value may
+    // emit any.
+    envelope::parse(&receipt, &receipt_len, &Boolean::TRUE)?;
+
+    // ---- statement hash ----
+    let signals = statement::compute_with(&ctx, backend)?;
+    statement::enforce(&signals, &public_hi, &public_lo, &Boolean::TRUE)?;
+
+    Ok(())
 }
 
 /// The public signals for a native witness, from the native reference encoder.
@@ -522,7 +576,7 @@ mod tests {
 
     fn satisfied(w: NativeWitness) -> bool {
         let cs = ConstraintSystem::<Fr>::new_ref();
-        NativeCircuit::prove(NativeBounds::default(), w)
+        KeccacheckNativeCircuit::prove(NativeBounds::default(), w)
             .generate_constraints(cs.clone())
             .unwrap();
         // Match the prover: inline symbolic expressions before evaluating them.
@@ -671,15 +725,59 @@ mod tests {
         assert_rejected(w, "accepted a receipt from a different trie key");
     }
 
-    /// Constraint count, so a cost regression is visible in the diff.
+    /// All 51 permutations, including inactive padded trie slots, must go
+    /// through the same backend. This also checks that setup is witness-free.
     #[test]
     fn cost() {
-        let cs = ConstraintSystem::<Fr>::new_ref();
-        NativeCircuit::prove(NativeBounds::default(), fixture::genuine())
-            .generate_constraints(cs.clone())
+        use ark_relations::gr1cs::SynthesisMode;
+        let bounds = NativeBounds::default();
+        let direct = ConstraintSystem::<Fr>::new_ref();
+        direct.set_mode(SynthesisMode::Setup);
+        NativeCircuit::setup(bounds)
+            .generate_constraints(direct.clone())
             .unwrap();
-        println!("  native relation: {} constraints", cs.num_constraints());
-        cs.finalize();
-        assert!(cs.is_satisfied().unwrap());
+        let direct_count = direct.num_constraints();
+        drop(direct);
+
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        cs.set_mode(SynthesisMode::Setup);
+        let mut batch = mirage_keccacheck_arkworks::batch::KeccacheckBatch::new(cs.clone());
+        generate_constraints_with_backend(NativeCircuit::setup(bounds), cs.clone(), &mut batch)
+            .unwrap();
+        let result = batch.finish().unwrap();
+        assert_eq!((result.recorded, result.padded), (51, 64));
+        assert!(cs.num_constraints() < direct_count);
+        println!(
+            "native constraints: direct={direct_count}, Keccacheck={}",
+            cs.num_constraints()
+        );
+    }
+
+    #[test]
+    fn rejects_an_unauthenticated_header() {
+        let mut w = fixture::genuine();
+        w.statement.witness_block_hash[0] ^= 1;
+        assert_rejected(w, "accepted the wrong authenticated header hash");
+    }
+
+    #[test]
+    fn rejects_a_foreign_receipts_root() {
+        let mut w = fixture::genuine();
+        w.header = crate::fixture::header_with_roots(
+            &crate::fixture::keccak(&w.transaction_nodes[0]),
+            &[0xab; 32],
+            21_000_000,
+        );
+        w.statement.witness_block_hash = crate::fixture::keccak(&w.header);
+        assert_rejected(w, "accepted a receipts root unrelated to the receipt trie");
+    }
+
+    #[test]
+    fn rejects_a_tampered_transaction_node() {
+        let mut w = fixture::genuine();
+        let leaf = w.transaction_nodes.last_mut().unwrap();
+        let last = leaf.len() - 1;
+        leaf[last] ^= 1;
+        assert_rejected(w, "accepted a transaction node with the wrong Keccak hash");
     }
 }
