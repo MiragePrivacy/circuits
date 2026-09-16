@@ -720,3 +720,40 @@ fn keccak_aligned_bounds() {
         100.0 * (deep - shallow) as f64 / deep as f64
     );
 }
+
+/// Exercise the batched backend on each observed transaction envelope and
+/// the largest/deepest bare-send shapes, using the actual compiled bounds.
+#[test]
+fn keccacheck_covers_mainnet_envelopes_and_deepest_tries() {
+    use mirage_relation::native::KeccacheckNativeCircuit;
+    let d = load().expect("checked-in native mainnet fixtures");
+    let bare: Vec<_> = d.fixtures.iter().filter(|f| f.bare_send).collect();
+    assert!(!bare.is_empty());
+    let mut selected = std::collections::BTreeMap::new();
+    for kind in [0, 1, 2] {
+        if let Some(f) = bare.iter().find(|f| f.transaction_type == kind) {
+            selected.insert(f.tx_hash.clone(), *f);
+        }
+    }
+    for metric in [
+        (|f: &&Fixture| f.transaction_depth + f.receipt_depth) as fn(&&Fixture) -> usize,
+        |f: &&Fixture| f.transaction_bytes,
+        |f: &&Fixture| f.max_transaction_node_bytes + f.max_receipt_node_bytes,
+    ] {
+        let f = bare.iter().copied().max_by_key(metric).unwrap();
+        selected.insert(f.tx_hash.clone(), f);
+    }
+    for f in selected.values() {
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        KeccacheckNativeCircuit::prove(NativeBounds::default(), witness(f))
+            .generate_constraints(cs.clone())
+            .expect("batched synthesis");
+        cs.finalize();
+        assert!(
+            cs.is_satisfied().unwrap(),
+            "Keccacheck rejected {}",
+            f.tx_hash
+        );
+    }
+    eprintln!("{} native mainnet cases satisfy Keccacheck", selected.len());
+}

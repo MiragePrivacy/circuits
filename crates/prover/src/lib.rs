@@ -409,18 +409,31 @@ pub mod native {
         proof_points, Bn254, Fr, Groth16, Keys, PreparedVerifyingKey, SeedableRng, Settlement,
         SettlementError, SNARK,
     };
-    use mirage_relation::native::{NativeBounds, NativeCircuit, NativeWitness};
+    use mirage_relation::native::{
+        KeccacheckNativeCircuit, NativeBounds, NativeCircuit, NativeWitness,
+    };
 
-    /// Runs the circuit-specific setup for the native relation.
+    /// Runs the circuit-specific setup for the direct-Keccak native control.
     ///
     /// The same toy stand-in for spec 18.2's multiparty Phase 2 that [`super::setup`]
-    /// is, and costs more: the native relation is ~1.7x the ERC-20 relation's
-    /// constraint count.
+    /// is. The native integration uses [`setup_keccacheck`] instead.
     pub fn setup(bounds: NativeBounds, seed: u64) -> Result<Keys, SettlementError> {
         let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(seed);
         let (pk, vk) =
             Groth16::<Bn254>::circuit_specific_setup(NativeCircuit::setup(bounds), &mut rng)
                 .map_err(|e| SettlementError::Setup(e.to_string()))?;
+        Ok(Keys { pk, vk })
+    }
+
+    /// Setup for the native relation with one private Keccacheck batch.
+    /// Its keys are incompatible with the direct-Keccak control returned by `setup`.
+    pub fn setup_keccacheck(bounds: NativeBounds, seed: u64) -> Result<Keys, SettlementError> {
+        let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(seed);
+        let (pk, vk) = Groth16::<Bn254>::circuit_specific_setup(
+            KeccacheckNativeCircuit::setup(bounds),
+            &mut rng,
+        )
+        .map_err(|e| SettlementError::Setup(e.to_string()))?;
         Ok(Keys { pk, vk })
     }
 
@@ -454,6 +467,38 @@ pub mod native {
         })
     }
 
+    /// Prove native ETH using Keccacheck for the commitment, header, both
+    /// tries, and statement. GKR witness generation is included; proof
+    /// randomness must be fresh, just as for the direct control.
+    pub fn prove_keccacheck<R: ark_std::rand::RngCore + ark_std::rand::CryptoRng>(
+        keys: &Keys,
+        bounds: NativeBounds,
+        witness: &NativeWitness,
+        rng: &mut R,
+    ) -> Result<Settlement, SettlementError> {
+        check_bounds(bounds, witness)?;
+        let (hi, lo) = mirage_relation::native::public_signals(witness);
+        let proof = Groth16::<Bn254>::prove(
+            &keys.pk,
+            KeccacheckNativeCircuit::prove(bounds, witness.clone()),
+            rng,
+        )
+        .map_err(|e| SettlementError::Prove(e.to_string()))?;
+
+        let pvk = PreparedVerifyingKey::from(keys.vk.clone());
+        let ok =
+            Groth16::<Bn254>::verify_with_processed_vk(&pvk, &[Fr::from(hi), Fr::from(lo)], &proof)
+                .map_err(|e| SettlementError::Verify(e.to_string()))?;
+        if !ok {
+            return Err(SettlementError::SelfCheck);
+        }
+
+        Ok(Settlement {
+            proof: proof_points(&proof),
+            signals: [hi, lo],
+        })
+    }
+
     /// [`prove`] with a seeded RNG, for artifacts that must reproduce byte-exactly.
     ///
     /// Not for production settlements, for the reason in [`super::prove_seeded`].
@@ -465,6 +510,18 @@ pub mod native {
     ) -> Result<Settlement, SettlementError> {
         let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(seed);
         prove(keys, bounds, witness, &mut rng)
+    }
+
+    /// Deterministic Keccacheck proof generation for reproducible test artifacts.
+    /// Production callers must use `prove_keccacheck` with fresh randomness.
+    pub fn prove_keccacheck_seeded(
+        keys: &Keys,
+        bounds: NativeBounds,
+        witness: &NativeWitness,
+        seed: u64,
+    ) -> Result<Settlement, SettlementError> {
+        let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(seed);
+        prove_keccacheck(keys, bounds, witness, &mut rng)
     }
 
     /// Checks a native witness against the compiled bounds before proving.
@@ -512,7 +569,11 @@ pub mod native {
             return over("receipt", w.receipt.len(), bounds.common.receipt_bytes);
         }
         if w.receipt_nodes.len() > bounds.common.depth {
-            return over("receipt trie depth", w.receipt_nodes.len(), bounds.common.depth);
+            return over(
+                "receipt trie depth",
+                w.receipt_nodes.len(),
+                bounds.common.depth,
+            );
         }
         if let Some(n) = w
             .receipt_nodes
