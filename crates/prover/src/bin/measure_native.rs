@@ -74,6 +74,8 @@ fn main() {
         bounds.common.header_bytes,
     );
 
+    println!("trie layout: constructed leaves; ancestor caps 308 B root / 532 B deeper");
+
     // Count without an expensive diagnostic satisfiability scan. Every proof
     // below is checked cryptographically by the public library API.
     let cs = ConstraintSystem::<Fr>::new_ref();

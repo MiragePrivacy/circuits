@@ -1,6 +1,6 @@
 # Mirage settlement circuits
 
-**Current native Keccacheck integration:** [implementation, counts, and benchmarks](NATIVE_ETH_STACK.md). The native circuit now uses a 51-permutation batch padded to 64 and has 11,620,286 constraints. The direct-Keccak figures below describe the earlier baseline.
+**Current native Keccacheck integration:** [implementation, counts, and benchmarks](NATIVE_ETH_STACK.md). The native circuit now uses a 65-permutation batch padded to 128 and has 7,327,757 constraints, with both tries supporting depth seven. The direct-Keccak figures below describe the earlier baseline.
 
 Rust/arkworks circuits for the ZK receipt relation in
 `../docs/standalone-zk-receipt-protocol-v1.2.md`.

@@ -63,7 +63,7 @@ use mirage_gadgets::bytes::alloc_bounded;
 use mirage_gadgets::commitment::ASSET_KIND_NATIVE;
 use mirage_gadgets::header;
 use mirage_gadgets::keccak::{DirectPermutation, PermutationBackend};
-use mirage_gadgets::mpt::{traverse::Traversal, ProofNode};
+use mirage_gadgets::mpt::{constructed_traverse::ConstructedLeafTraversal, ProofNode};
 use mirage_gadgets::receipt::envelope;
 use mirage_gadgets::statement;
 use mirage_gadgets::transaction::{NativeIntent, NativeTransfer, TransactionRelation};
@@ -80,7 +80,7 @@ pub const MEASUREMENT_SCOPE: &str =
 
 /// Compiled bounds for the native build.
 ///
-/// Native bounds are frozen independently of the optimized ERC-20 relation.
+/// Native value bounds are independent of the ERC-20 receipt layout.
 /// They bound both trie walks and the transaction and receipt parsers.
 #[derive(Clone, Copy)]
 pub struct NativeBounds {
@@ -94,12 +94,11 @@ pub struct NativeBounds {
     /// over-tight bound makes a settlement unprovable at the executor's expense
     /// (spec 12.9), so headroom is cheap insurance.
     pub transaction_bytes: usize,
-    /// The transaction trie's maximum node size.
+    /// Maximum ancestor buffer size (further capped at 308/532 structurally).
     ///
-    /// A transaction-trie branch node holds 16 hash references plus a value
-    /// slot, the same structure as a receipt-trie branch, so 544 is the same
-    /// structural worst case. The tries have the same shape because they carry
-    /// the same number of entries under the same keys.
+    /// This retains the previous API ceiling. Actual allocation uses at most
+    /// 308 bytes at the root and 532 bytes deeper in either sequential trie.
+    /// The terminal leaf is constructed and has no witnessed node buffer.
     pub transaction_node_bytes: usize,
     /// The transaction trie's maximum depth.
     ///
@@ -111,13 +110,13 @@ pub struct NativeBounds {
 
 impl Default for NativeBounds {
     fn default() -> Self {
-        // Freeze the native circuit shape independently of ERC-20 optimizations.
+        // Six key nibbles permit six ancestors and one terminal leaf.
         let common = Bounds {
             node_bytes: 544,
             key_bytes: 3,
             receipt_bytes: 512,
             header_bytes: 704,
-            depth: 4,
+            depth: 7,
         };
         Self {
             transaction_bytes: 512,
@@ -142,6 +141,7 @@ pub struct NativeWitness {
     /// The settling transaction, envelope included.
     pub transaction: Vec<u8>,
     /// The transaction's inclusion path under `transactionsRoot`, root first.
+    /// The last entry is redundant: its leaf is constructed from key/value.
     pub transaction_nodes: Vec<Vec<u8>>,
 
     /// The matching receipt, envelope included.
@@ -183,21 +183,25 @@ impl NativeCircuit {
     }
 }
 
-/// Allocates a bounded node array for one trie.
+/// Allocate ancestors only; construct the terminal leaf from the bound value.
 fn alloc_nodes<F: PrimeField>(
     cs: ConstraintSystemRef<F>,
     nodes: &[Vec<u8>],
     depth: usize,
     node_bytes: usize,
 ) -> Result<Vec<ProofNode<F>>, SynthesisError> {
-    let mut out = Vec::with_capacity(depth);
-    for i in 0..depth {
-        let (bytes, len, active) = match nodes.get(i) {
+    let ancestors = nodes.len().saturating_sub(1);
+    let mut out = Vec::with_capacity(depth.saturating_sub(1));
+    for i in 0..depth.saturating_sub(1) {
+        // Sequential three-byte index keys have at most nine root children.
+        // Deeper branches have sixteen hash references and an empty value.
+        let bound = node_bytes.min(if i == 0 { 308 } else { 532 });
+        let (bytes, len, active) = match nodes.get(i).filter(|_| i < ancestors) {
             Some(n) => (n.clone(), n.len(), true),
             None => (Vec::new(), 0, false),
         };
         out.push(ProofNode {
-            bytes: alloc_bounded(cs.clone(), &bytes, node_bytes)?,
+            bytes: alloc_bounded(cs.clone(), &bytes, bound)?,
             len: FpVar::new_witness(cs.clone(), || Ok(F::from(len as u64)))?,
             active: Boolean::new_witness(cs.clone(), || Ok(active))?,
         });
@@ -333,7 +337,7 @@ pub fn generate_constraints_with_backend<F: PrimeField, B: PermutationBackend<F>
     // The header supplies both roots rather than the caller. Accepting
     // caller-supplied roots would let a prover invent tries containing
     // whatever it liked.
-    let parsed = header::parse(&header_bytes, &header_len, &Boolean::TRUE)?;
+    let parsed = header::parse_authenticated_prefix(&header_bytes, &header_len, &Boolean::TRUE)?;
 
     // Authenticate the header itself: parsing roots out of it is not useful
     // unless it is the exact witness block the verifier selected.
@@ -358,7 +362,7 @@ pub fn generate_constraints_with_backend<F: PrimeField, B: PermutationBackend<F>
 
     // Trie one: the transaction is at `key` under `transactionsRoot`. This
     // binds the exact bytes the transfer relation then reads.
-    Traversal::verify_inclusion_with(
+    ConstructedLeafTraversal::verify_value_inclusion_with(
         &parsed.transactions_root,
         &key,
         &key_len,
@@ -371,7 +375,7 @@ pub fn generate_constraints_with_backend<F: PrimeField, B: PermutationBackend<F>
     // Trie two: the receipt is at the *same* key under `receiptsRoot`.
     // Sharing the key is what makes this the settling transaction's own
     // receipt rather than some other successful transaction's.
-    Traversal::verify_inclusion_with(
+    ConstructedLeafTraversal::verify_value_inclusion_with(
         &parsed.receipts_root,
         &key,
         &key_len,
@@ -725,7 +729,46 @@ mod tests {
         assert_rejected(w, "accepted a receipt from a different trie key");
     }
 
-    /// All 51 permutations, including inactive padded trie slots, must go
+    /// Exercise both constructed root leaves and the full six-nibble path.
+    #[test]
+    fn accepts_singleton_and_depth_seven_tries() {
+        use crate::fixture::{enc_list, enc_str, hex_prefix, keccak, to_nibbles};
+        for depth in [1, 7] {
+            let mut w = fixture::genuine();
+            w.key = if depth == 1 {
+                vec![0x80]
+            } else {
+                vec![0x82, 0x10, 0x00]
+            };
+            let path = to_nibbles(&w.key);
+            let build = |value: &[u8]| {
+                let consumed = depth - 1;
+                let leaf = enc_list(&[
+                    enc_str(&hex_prefix(&path[consumed..], true)),
+                    enc_str(value),
+                ]);
+                let mut nodes = vec![leaf];
+                for nibble in path[..consumed].iter().rev() {
+                    let mut children = vec![enc_str(&[]); 16];
+                    children[*nibble as usize] = enc_str(&keccak(&nodes[0]));
+                    children.push(enc_str(&[]));
+                    nodes.insert(0, enc_list(&children));
+                }
+                nodes
+            };
+            w.transaction_nodes = build(&w.transaction);
+            w.receipt_nodes = build(&w.receipt);
+            w.header = crate::fixture::header_with_roots(
+                &keccak(&w.transaction_nodes[0]),
+                &keccak(&w.receipt_nodes[0]),
+                21_000_000,
+            );
+            w.statement.witness_block_hash = keccak(&w.header);
+            assert!(satisfied(w), "failed at depth {depth}");
+        }
+    }
+
+    /// All permutations, including inactive padded trie slots, must go
     /// through the same backend. This also checks that setup is witness-free.
     #[test]
     fn cost() {
@@ -745,7 +788,7 @@ mod tests {
         generate_constraints_with_backend(NativeCircuit::setup(bounds), cs.clone(), &mut batch)
             .unwrap();
         let result = batch.finish().unwrap();
-        assert_eq!((result.recorded, result.padded), (51, 64));
+        assert_eq!((result.recorded, result.padded), (65, 128));
         assert!(cs.num_constraints() < direct_count);
         println!(
             "native constraints: direct={direct_count}, Keccacheck={}",
@@ -773,11 +816,12 @@ mod tests {
     }
 
     #[test]
-    fn rejects_a_tampered_transaction_node() {
+    fn rejects_a_tampered_transaction_value() {
         let mut w = fixture::genuine();
-        let leaf = w.transaction_nodes.last_mut().unwrap();
-        let last = leaf.len() - 1;
-        leaf[last] ^= 1;
-        assert_rejected(w, "accepted a transaction node with the wrong Keccak hash");
+        // Leaf witness bytes are redundant: the circuit constructs them.
+        // Mutate the authenticated value instead.
+        let last = w.transaction.len() - 1;
+        w.transaction[last] ^= 1;
+        assert_rejected(w, "accepted a transaction value with the wrong Keccak hash");
     }
 }
