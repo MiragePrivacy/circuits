@@ -211,3 +211,16 @@ RSS falling from 27.272 to 24.831 GiB and the uncompressed key from 7.168 to
 4.378 GiB. This port reduces constraints and memory, but the sample shows no
 proving-time improvement because GKR expression inlining offsets the savings.
 See [native implementation, validation, and full benchmark](../../NATIVE_ETH_STACK.md).
+
+## Native structural optimization follow-up (2026-09-22)
+
+Applied authenticated header-prefix extraction, constructed leaves to both
+tries, structural ancestor bounds, depth seven, and shared transaction RLP
+decoding. Constraints: 11,620,286 → 7,327,757. A fresh sequential three-proof
+comparison measured median verified proving 47.379 → 42.525 s, uncompressed
+key 4.378 → 2.661 GiB, and total peak RSS 24.831 → 23.298 GiB. Setup peak
+RSS rises from 16.818 to 18.770 GiB as the batch grows from 64 to 128.
+
+[Full methodology, audit, and validation](../../NATIVE_ETH_STACK.md).
+[Before profile](benchmarks/native-structural-before.log),
+[after profile](benchmarks/native-structural-after.log).
