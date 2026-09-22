@@ -44,6 +44,70 @@ statement ABI is unchanged.
 The native APIs remain `setup_keccacheck`, `prove_keccacheck`, and
 `prove_keccacheck_seeded`. Seeded helpers are for reproducible tests/artifacts.
 
+## Fresh before/after host benchmark (2026-09-22 UTC)
+
+Both executables were rebuilt with rustc 1.97.1, release profile, and
+`-C target-feature=+bmi2,+adx`, on the same Intel Core i9-14900HX host
+(24 CPUs, 93 GiB RAM), with 16 Rayon threads. Before is `3d78fb8`;
+after is implementation `fc3f905`. Each ran in a fresh process, sequentially,
+after all local builds and tests finished. Both use the same fixture, setup
+seed, and proof seeds 0/1/2. CPU affinity and desktop activity were not controlled.
+
+| Metric | Before (depth 4) | After (depth 7) |
+|---|---:|---:|
+| Constraints | 11,620,286 | 7,327,757 |
+| Setup | 67.398 s | 56.253 s |
+| Proof 1 | 46.850 s | 44.098 s |
+| Proof 2 | 47.484 s | 42.525 s |
+| Proof 3 | 47.379 s | 41.304 s |
+| **Median verified proof** | **47.379 s** | **42.525 s** |
+| Uncompressed proving key | 4.378 GiB | 2.661 GiB |
+| Compressed proving key | 2.189 GiB | 1.330 GiB |
+| Peak RSS after setup | 16.818 GiB | 18.770 GiB |
+| **Total peak process RSS** | **24.831 GiB** | **23.298 GiB** |
+
+All six proofs verified. The observed median is **10.2% lower**, the key is
+**39.2% smaller**, and total peak RSS is **6.2% lower**, with wider trie capacity.
+Setup peak memory increases because the larger GKR batch adds expression
+handling cost. Total RSS includes counting, setup, and all three proofs;
+it is not proving-only memory. Proving includes GKR witness generation and
+Groth16 self-verification. Three host samples do not establish p95 or SGX
+hardware performance.
+
+Raw logs: [before](experiments/keccacheck-arkworks/benchmarks/native-structural-before.log),
+[after](experiments/keccacheck-arkworks/benchmarks/native-structural-after.log).
+
+Executable SHA-256:
+
+- Before: `6ce67693ea003f2ffd66bec748c94da75f957f666ee8a14e917e554b19575fc7`
+- After: `401338467a8e0424317ec52361c35412fb2fd7d90ceee7b1cec86da293adc069`
+
+Reproduce at each revision with `nix develop --command env RAYON_NUM_THREADS=16 RELATION_PROFILE=1 cargo run --release -p mirage-prover --bin measure-native`.
+
+## Current validation
+
+- Native Keccacheck relation: 13 tests passed, including singleton/depth-seven
+  paths and rejection of wrong roots, key, value, status,
+  lease, asset kind, and unauthenticated header.
+- Five selected mainnet cases passed (legacy/EIP-1559 and largest/deepest
+  observed shapes); synthetic depth-seven coverage exceeds sampled depth.
+- Transaction adversarial suite: 22 tests passed, including type-1 transactions
+  and non-empty access lists.
+- General leaf construction: 140 length/path combinations matched independently
+  encoded RLP hashes, including both inner and outer prefix transitions;
+  additional bare-byte and out-of-bounds-length tests passed.
+- A real native Groth16 proof verified; escrow native/ ERC-20 suites: 19 passed.
+- Nomad: explicit native key/proof test, 105 regular tests, Fortanix check, and
+  mandatory host/Fortanix Clippy commit checks passed. The published circuit
+  revision was checked again for Fortanix after pinning.
+- Circuit Clippy workspace/all-targets passed with the existing
+  `manual_is_multiple_of` lint allowance for the unchanged legacy leaf code.
+
+Matching stack: circuits implementation `fc3f905`, escrow `a937a4a`,
+Nomad `e4fdb24` (ISVSVN 14). Nomad's existing legacy native signal dispatcher
+still needs the separately documented ZK routing work; these results validate
+native proving APIs and matching verifier artifacts.
+
 ## Historical batching-only port
 
 The following records the earlier depth-four implementation and its benchmark.
