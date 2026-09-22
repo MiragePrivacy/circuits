@@ -137,6 +137,105 @@ pub fn hash_leaf_from_remainder_with<F: PrimeField, B: PermutationBackend<F>>(
     keccak256_var_with(&leaf, &leaf_len, active, backend)
 }
 
+/// Construct a terminal leaf for an arbitrary bounded value (including short
+/// signed transactions), without the receipt-only 256..511-byte assumption.
+pub fn hash_value_leaf_from_remainder_with<F: PrimeField, B: PermutationBackend<F>>(
+    value: &[UInt8<F>],
+    value_len: &FpVar<F>,
+    key: &[UInt8<F>],
+    key_len: &FpVar<F>,
+    consumed: &FpVar<F>,
+    active: &Boolean<F>,
+    backend: &mut B,
+) -> Result<[Byte<F>; 32], SynthesisError> {
+    crate::bytes::assert_at_most(key_len, key.len(), active)?;
+    let (encoded_value, encoded_len) = encode_bounded_rlp(value, value_len, false, active)?;
+    let remaining = key_len * FpVar::constant(F::from(2u64)) - consumed;
+    let mut body = vec![UInt8::constant(0); encoded_value.len() + 2 + key.len()];
+    let mut path_len = FpVar::zero();
+    let mut any = Boolean::FALSE;
+    for n in 0..=key.len() * 2 {
+        let selected = remaining.is_eq(&FpVar::constant(F::from(n as u64)))?;
+        any |= selected.clone();
+        let path = path_bytes(key, consumed, n, &(active.clone() & selected.clone()))?;
+        let mut prefix = Vec::new();
+        if path.len() > 1 {
+            prefix.push(UInt8::constant(0x80 + path.len() as u8));
+        }
+        prefix.extend(path);
+        path_len = FpVar::conditionally_select(
+            &selected,
+            &FpVar::constant(F::from(prefix.len() as u64)),
+            &path_len,
+        )?;
+        let mut candidate = vec![UInt8::constant(0); body.len()];
+        candidate[..prefix.len()].clone_from_slice(&prefix);
+        candidate[prefix.len()..prefix.len() + encoded_value.len()]
+            .clone_from_slice(&encoded_value);
+        for (out, byte) in body.iter_mut().zip(candidate.iter()) {
+            *out = UInt8::conditionally_select(&selected, byte, out)?;
+        }
+    }
+    any.conditional_enforce_equal(&Boolean::TRUE, active)?;
+    let (leaf, leaf_len) = encode_bounded_rlp(&body, &(encoded_len + path_len), true, active)?;
+    keccak256_var_with(&leaf, &leaf_len, active, backend)
+}
+
+/// Canonical string/list prefixes for buffers below 64 KiB. Payload padding
+/// remains outside the returned length and therefore outside the hash.
+fn encode_bounded_rlp<F: PrimeField>(
+    bytes: &[UInt8<F>],
+    len: &FpVar<F>,
+    list: bool,
+    active: &Boolean<F>,
+) -> Result<(Vec<UInt8<F>>, FpVar<F>), SynthesisError> {
+    use ark_r1cs_std::convert::ToBitsGadget;
+    assert!(!bytes.is_empty() && bytes.len() < 65536);
+    crate::bytes::assert_at_most(len, bytes.len(), active)?;
+    let native = fp_to_u64(len.value().unwrap_or(F::zero()));
+    let hi = UInt8::new_witness(len.cs(), || Ok((native >> 8) as u8))?;
+    let low = UInt8::new_witness(len.cs(), || Ok(native as u8))?;
+    (byte_to_field(&hi)? * FpVar::constant(F::from(256u64)) + byte_to_field(&low)?)
+        .conditional_enforce_equal(len, active)?;
+    let bare = if list {
+        Boolean::FALSE
+    } else {
+        len.is_eq(&FpVar::one())? & !bytes[0].to_bits_le()?[7].clone()
+    };
+    let short = crate::bytes::le(len, &FpVar::constant(F::from(55u64)))?;
+    let one_length_byte = hi.is_eq(&UInt8::constant(0))?;
+    let selectors = [
+        bare.clone(),
+        short.clone() & !bare,
+        !short.clone() & one_length_byte.clone(),
+        !short & !one_length_byte,
+    ];
+    let base = if list { 0xc0u64 } else { 0x80u64 };
+    let short_prefix = UInt8::new_witness(len.cs(), || Ok((base + native) as u8))?;
+    byte_to_field(&short_prefix)?.conditional_enforce_equal(
+        &(len + FpVar::constant(F::from(base))),
+        &(active.clone() & selectors[1].clone()),
+    )?;
+    let prefixes = [
+        vec![],
+        vec![short_prefix],
+        vec![UInt8::constant((base + 55 + 1) as u8), low.clone()],
+        vec![UInt8::constant((base + 55 + 2) as u8), hi, low],
+    ];
+    let mut out = vec![UInt8::constant(0); bytes.len() + 3];
+    let mut header_len = FpVar::zero();
+    for (selected, prefix) in selectors.iter().zip(prefixes.iter()) {
+        let mut candidate = vec![UInt8::constant(0); out.len()];
+        candidate[..prefix.len()].clone_from_slice(prefix);
+        candidate[prefix.len()..prefix.len() + bytes.len()].clone_from_slice(bytes);
+        for (out, byte) in out.iter_mut().zip(candidate.iter()) {
+            *out = UInt8::conditionally_select(selected, byte, out)?;
+        }
+        header_len += FpVar::from(selected.clone()) * FpVar::constant(F::from(prefix.len() as u64));
+    }
+    Ok((out, len + header_len))
+}
+
 fn path_bytes<F: PrimeField>(
     key: &[UInt8<F>],
     consumed: &FpVar<F>,
@@ -266,6 +365,86 @@ mod tests {
                 6 - consumed
             );
             assert!(cs.is_satisfied().unwrap());
+        }
+    }
+
+    #[test]
+    fn general_encoding_handles_bare_bytes_and_rejects_oversized_length() {
+        for byte in [0u8, 0x7f, 0x80, 0xff] {
+            let cs = ConstraintSystem::<Fr>::new_ref();
+            let buf = alloc_bounded(cs.clone(), &[byte], 8).unwrap();
+            let len = FpVar::new_witness(cs.clone(), || Ok(Fr::from(1u64))).unwrap();
+            let (encoded, encoded_len) =
+                encode_bounded_rlp(&buf, &len, false, &Boolean::TRUE).unwrap();
+            let expected = if byte < 0x80 {
+                vec![byte]
+            } else {
+                vec![0x81, byte]
+            };
+            assert_eq!(
+                encoded_len.value().unwrap(),
+                Fr::from(expected.len() as u64)
+            );
+            assert_eq!(
+                encoded[..expected.len()]
+                    .iter()
+                    .map(|b| b.value().unwrap())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            assert!(cs.is_satisfied().unwrap());
+        }
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        let buf = alloc_bounded(cs.clone(), &[0x42; 8], 8).unwrap();
+        let len = FpVar::new_witness(cs.clone(), || Ok(Fr::from(9u64))).unwrap();
+        let _ = encode_bounded_rlp(&buf, &len, false, &Boolean::TRUE).unwrap();
+        assert!(!cs.is_satisfied().unwrap());
+    }
+
+    #[test]
+    fn general_value_leaf_matches_canonical_rlp_at_length_boundaries() {
+        // Cover both value-prefix and outer-list-prefix transitions, for every
+        // remaining path width. Compare with an independent native encoder.
+        for len in [
+            0usize, 1, 49, 50, 51, 52, 53, 54, 55, 56, 249, 250, 251, 252, 253, 254, 255, 256, 511,
+            512,
+        ] {
+            for consumed in 0..=6 {
+                let value = vec![if len == 1 { 0x80 } else { 0x42 }; len];
+                let cs = ConstraintSystem::<Fr>::new_ref();
+                let buf = alloc_bounded(cs.clone(), &value, 512).unwrap();
+                let value_len =
+                    FpVar::new_witness(cs.clone(), || Ok(Fr::from(len as u64))).unwrap();
+                let key = alloc_bounded(cs.clone(), &[0x82, 0x10, 0x00], 3).unwrap();
+                let key_len = FpVar::new_witness(cs.clone(), || Ok(Fr::from(3u64))).unwrap();
+                let offset =
+                    FpVar::new_witness(cs.clone(), || Ok(Fr::from(consumed as u64))).unwrap();
+                let digest = hash_value_leaf_from_remainder_with(
+                    &buf,
+                    &value_len,
+                    &key,
+                    &key_len,
+                    &offset,
+                    &Boolean::TRUE,
+                    &mut DirectPermutation,
+                )
+                .unwrap();
+                let got: Vec<u8> = digest
+                    .iter()
+                    .map(|bits| {
+                        bits.iter()
+                            .enumerate()
+                            .fold(0, |v, (i, b)| v | ((b.value().unwrap() as u8) << i))
+                    })
+                    .collect();
+                let leaf = crate::mpt::tests::leaf_node(&[8, 2, 1, 0, 0, 0][consumed..], &value);
+                assert_eq!(
+                    got,
+                    mirage_encoding::keccak256(&leaf),
+                    "length {len}, consumed {consumed}"
+                );
+                assert!(cs.is_satisfied().unwrap());
+            }
         }
     }
 

@@ -1,50 +1,53 @@
 # Native ETH with Keccacheck
 
-The native dual-trie circuit now authenticates every Keccak-f permutation with
-one private Keccacheck GKR batch inside a single externally verified Groth16
-proof. It builds on the optimized ERC-20 branch (circuits PR #2).
+## Structural optimizations (2026-09-22)
 
-## Relation and APIs
+The native circuit now applies the base circuit's authenticated header prefix,
+constructed terminal leaves, structural ancestor bounds, and universal depth
+seven to **both** tries. The transaction parser also shares one canonical RLP
+walk across legacy, EIP-2930, and EIP-1559 layouts, decoding at most 12 items
+instead of speculatively decoding 9 + 11 + 12 items and duplicate outer lists.
 
-`KeccacheckNativeCircuit` shares the native relation with the direct-Keccak
-`NativeCircuit` control. A single backend collects hashes from:
+| Base technique | Native implementation |
+|---|---|
+| Authenticated header prefix (3b7b1a6) | Read both roots and block number at fixed offsets; retain the full header hash check. |
+| Constructed terminal leaf (c7ef300) | Construct both leaves from authenticated values and key remainders; support short transactions and all RLP length transitions. |
+| Structural ancestor buffers / universal depth (da4f097) | 308-byte root and 532-byte deeper ancestors; six ancestors plus one constructed leaf per trie. |
+| Specialized receipt layout (1671ecd) | ERC-20 sole-Transfer layout does not apply; share native transaction decoding across the three supported layouts instead. |
+| Structural 448-byte receipt limit (902ad3e) | Keep native receipts at 512 bytes: empty calldata can still invoke a receiver that emits logs. Keep the general status/receipt parser. |
+| One-hot read fix (b5192b4) | Already inherited by shared gadgets. |
+| Batched Keccacheck / reproducible proving | Retained, with one batch shared by all native hashes. |
 
-| Input | Permutations at compiled bounds |
-|---|---:|
-| Intent commitment | 2 |
-| Authenticated block header | 6 |
-| Four transaction-trie nodes | 20 |
-| Four receipt-trie nodes | 20 |
-| Statement | 3 |
-| **Total** | **51, padded to 64** |
+The ERC-20 leaf path remains unchanged. The new general-value leaf encoder
+handles bare RLP bytes, short strings, one-byte lengths, and two-byte lengths.
+The existing proof-node API still includes the terminal node for compatibility;
+its bytes are redundant because the circuit constructs the leaf. Prover bounds
+check only witnessed ancestors against their actual compiled bounds.
 
-The transaction and its successful receipt must remain under the same block
-header and trie key. Bare-send, recipient, amount, asset-kind, commitment,
-context, and lease-window checks are unchanged. Inactive node slots are still
-part of the fixed circuit; witness depth cannot change the batch shape.
+Default transaction and receipt buffers remain 512 bytes, keys 3 bytes, headers
+704 bytes. Both trie depths increase from 4 to 7, sufficient for six nibbles.
+Setup and proving use the same fixed shape, independent of actual path depth.
 
-Native proving uses `mirage_prover::native::{setup_keccacheck,
-prove_keccacheck, prove_keccacheck_seeded}`. Production callers supply fresh
-randomness to `prove_keccacheck`; the seeded helper is only for tests and
-reproducible artifacts. The original `setup`/`prove` APIs remain as the direct
-control and use incompatible proving/verifying keys.
+| Metric | Previous native port | Optimized native |
+|---|---:|---:|
+| Constraints, Keccacheck | 11,620,286 | 7,327,757 |
+| Constraints, direct control | 17,635,451 | 15,257,357 |
+| Trie depth, each | 4 | 7 |
+| Recorded / padded permutations | 51 / 64 | 65 / 128 |
 
-The native verifier exporter and Nomad native settlement flow use Keccacheck.
-The escrow embeds the regenerated native verification key. The GKR proof is
-private witness data; the on-chain Groth16 proof/statement ABI is unchanged.
+This is **36.9% fewer constraints than the previous native Keccacheck port**, with
+broader trie capacity. The 65 permutations comprise commitment 2, header 6,
+transaction ancestors 23 + leaf 4, receipt ancestors 23 + leaf 4, statement 3.
+The new shape requires a new native proving key and verifier; the Groth16
+statement ABI is unchanged.
 
-## Bounds and constraint count
+The native APIs remain `setup_keccacheck`, `prove_keccacheck`, and
+`prove_keccacheck_seeded`. Seeded helpers are for reproducible tests/artifacts.
 
-Both controls use identical bounds: 544-byte nodes, 3-byte keys, 512-byte
-receipts, 704-byte headers, depth 4 for each trie, and 512-byte transactions.
-This port keeps native parsing and trie traversal semantics unchanged; it does
-not import the ERC-20-specific fixed receipt layout.
+## Historical batching-only port
 
-| Backend | Constraints |
-|---|---:|
-| Native direct Keccak | 17,635,451 |
-| Native Keccacheck | 11,620,286 |
-| Reduction | 6,015,165 (34.1%) |
+The following records the earlier depth-four implementation and its benchmark.
+It is retained as historical evidence, not the current circuit shape.
 
 ## Host benchmark (2026-09-16 UTC)
 

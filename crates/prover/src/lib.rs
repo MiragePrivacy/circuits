@@ -553,16 +553,17 @@ pub mod native {
                 bounds.transaction_depth,
             );
         }
-        if let Some(n) = w
+        for (i, node) in w
             .transaction_nodes
             .iter()
-            .find(|n| n.len() > bounds.transaction_node_bytes)
+            .take(w.transaction_nodes.len().saturating_sub(1))
+            .enumerate()
         {
-            return over(
-                "transaction trie node",
-                n.len(),
-                bounds.transaction_node_bytes,
-            );
+            let structural_bound = if i == 0 { 308 } else { 532 };
+            let max = bounds.transaction_node_bytes.min(structural_bound);
+            if node.len() > max {
+                return over("transaction_nodes ancestor", node.len(), max);
+            }
         }
 
         if w.receipt.len() > bounds.common.receipt_bytes {
@@ -575,12 +576,17 @@ pub mod native {
                 bounds.common.depth,
             );
         }
-        if let Some(n) = w
+        for (i, node) in w
             .receipt_nodes
             .iter()
-            .find(|n| n.len() > bounds.common.node_bytes)
+            .take(w.receipt_nodes.len().saturating_sub(1))
+            .enumerate()
         {
-            return over("receipt trie node", n.len(), bounds.common.node_bytes);
+            let structural_bound = if i == 0 { 308 } else { 532 };
+            let max = bounds.common.node_bytes.min(structural_bound);
+            if node.len() > max {
+                return over("receipt_nodes ancestor", node.len(), max);
+            }
         }
         Ok(())
     }

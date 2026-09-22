@@ -69,6 +69,35 @@ impl ConstructedLeafTraversal {
         nodes: &[ProofNode<F>],
         backend: &mut B,
     ) -> Result<(), SynthesisError> {
+        Self::verify_inclusion_impl::<F, B, false>(
+            root, key, key_len, value, value_len, nodes, backend,
+        )
+    }
+
+    /// General value variant for transaction and native receipt leaves.
+    pub fn verify_value_inclusion_with<F: PrimeField, B: PermutationBackend<F>>(
+        root: &[UInt8<F>],
+        key: &[UInt8<F>],
+        key_len: &FpVar<F>,
+        value: &[UInt8<F>],
+        value_len: &FpVar<F>,
+        nodes: &[ProofNode<F>],
+        backend: &mut B,
+    ) -> Result<(), SynthesisError> {
+        Self::verify_inclusion_impl::<F, B, true>(
+            root, key, key_len, value, value_len, nodes, backend,
+        )
+    }
+
+    fn verify_inclusion_impl<F: PrimeField, B: PermutationBackend<F>, const GENERAL_VALUE: bool>(
+        root: &[UInt8<F>],
+        key: &[UInt8<F>],
+        key_len: &FpVar<F>,
+        value: &[UInt8<F>],
+        value_len: &FpVar<F>,
+        nodes: &[ProofNode<F>],
+        backend: &mut B,
+    ) -> Result<(), SynthesisError> {
         // Nibble reads past the key buffer return zero rather than failing, so
         // an unbounded `key_len` lets the path consume nibbles the key does not
         // have. The nibble reads are gated in range individually; this bounds
@@ -195,7 +224,12 @@ impl ConstructedLeafTraversal {
             .first()
             .map(|byte| byte.cs().num_constraints())
             .unwrap_or(0);
-        let leaf_digest = hash_leaf_from_remainder_with(
+        let hash_leaf = if GENERAL_VALUE {
+            super::constructed_leaf::hash_value_leaf_from_remainder_with::<F, B>
+        } else {
+            hash_leaf_from_remainder_with::<F, B>
+        };
+        let leaf_digest = hash_leaf(
             value,
             value_len,
             key,

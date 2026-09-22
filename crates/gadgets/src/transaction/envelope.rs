@@ -10,9 +10,9 @@
 //! 0x02     12   5      6     7   EIP-1559
 //! ```
 //!
-//! Each is decoded speculatively under its own `active` flag, because
-//! `decode_list` enforces an exact item count and a false constraint does not
-//! select away. See the module docs on [`super`].
+//! One cursor walks the selected envelope. The final three positions are
+//! gated by its exact item count; recipient/value/data indices are selected
+//! from the shared decoded items.
 
 use ark_ff::PrimeField;
 use ark_r1cs_std::boolean::Boolean;
@@ -127,32 +127,38 @@ pub fn parse<F: PrimeField>(
     }
     matched.conditional_enforce_equal(&FpVar::one(), active)?;
 
-    // Decode each shape speculatively, gated on its own selector, and select
-    // the two fields afterwards. A shape whose selector is false computes a
-    // possibly-wrong answer rather than emitting a false constraint, which is
-    // what makes selecting valid.
+    // Share the RLP walk across layouts instead of decoding 9 + 11 + 12
+    // items speculatively. Each active child is canonical and contained, and
+    // the selected count must tile the outer list exactly.
+    let typed = is_shape[1].clone() | is_shape[2].clone();
+    let payload_at = &zero + FpVar::from(typed);
+    let list = Cursor::decode_item(transaction, &payload_at, active)?;
+    list.is_list
+        .conditional_enforce_equal(&Boolean::TRUE, active)?;
+    let list_end = list.end();
+    list_end.conditional_enforce_equal(transaction_len, active)?;
+    let mut cursor = list.offset.clone();
+    let mut items = Vec::with_capacity(12);
+    for i in 0..12 {
+        let mut present = Boolean::FALSE;
+        for (shape, hit) in SHAPES.iter().zip(&is_shape) {
+            if i < shape.items {
+                present |= hit;
+            }
+        }
+        let child_active = active.clone() & present;
+        let child = Cursor::decode_item(transaction, &cursor, &child_active)?;
+        let child_end = child.end();
+        le(&child_end, &list_end)?.conditional_enforce_equal(&Boolean::TRUE, &child_active)?;
+        cursor = FpVar::conditionally_select(&child_active, &child_end, &cursor)?;
+        items.push(child);
+    }
+    cursor.conditional_enforce_equal(&list_end, active)?;
+
     let mut to: Option<Item<F>> = None;
     let mut value: Option<Item<F>> = None;
     let mut data: Option<Item<F>> = None;
-
-    for (shape, hit) in SHAPES.iter().zip(is_shape.iter()) {
-        let shape_active = active.clone() & hit;
-
-        // The payload begins after the type prefix, if there is one.
-        let payload_at = match shape.prefix {
-            None => zero.clone(),
-            Some(_) => &zero + FpVar::one(),
-        };
-
-        let items = Cursor::decode_list(transaction, &payload_at, shape.items, &shape_active)?;
-
-        // The list must span the whole transaction: no trailing bytes.
-        let list = Cursor::decode_item(transaction, &payload_at, &shape_active)?;
-        list.is_list
-            .conditional_enforce_equal(&Boolean::TRUE, &shape_active)?;
-        list.end()
-            .conditional_enforce_equal(transaction_len, &shape_active)?;
-
+    for (shape, hit) in SHAPES.iter().zip(&is_shape) {
         to = Some(match to {
             None => items[shape.to].clone(),
             Some(prev) => select_item(hit, &items[shape.to], &prev)?,

@@ -627,8 +627,9 @@ fn keccak_alignment_of_the_node_bound() {
             String::new()
         };
         eprintln!(
-            "  {node_bytes:4} -> {} permutations, {n:>10} constraints{saved}",
-            node_bytes / 136 + 1,
+            "  {node_bytes:4} API cap -> root {} / deeper {} permutations, {n:>10} constraints{saved}",
+            node_bytes.min(308) / 136 + 1,
+            node_bytes.min(532) / 136 + 1,
         );
         assert!(
             cs.is_satisfied().unwrap(),
@@ -699,12 +700,11 @@ fn keccak_aligned_bounds() {
 
     // Depth is the other multiplier on the dominant term. Both tries are keyed
     // by `rlp(transactionIndex)` over the same entry count, so they always have
-    // the same depth: observed 2 to 3 against a compiled 4.
+    // the same depth: observed 2 to 3 against a compiled 7.
     //
-    // Not a recommendation. Depth 4 holds 65,536 entries and depth 3 only
-    // 4,096; blocks do not reach either today, but this is the bound where
-    // being wrong makes a settlement unprovable at the executor's expense, so
-    // the headroom is bought deliberately. Measured here so the price is known.
+    // Depth three is a sampled cutoff, not a universal capacity guarantee.
+    // The compiled seven levels cover all six-nibble keys. Measure the
+    // smaller tier only to show the cost of this guarantee.
     let deep = measure(aligned);
     let shallow = measure(NativeBounds {
         common: Bounds {
@@ -715,7 +715,7 @@ fn keccak_aligned_bounds() {
         ..aligned
     });
     eprintln!(
-        "\ndepth 4 -> 3 (on top of alignment): {} saved ({:.1}%), leaving {shallow}",
+        "\ndepth 7 -> 3 (on top of alignment): {} saved ({:.1}%), leaving {shallow}",
         deep - shallow,
         100.0 * (deep - shallow) as f64 / deep as f64
     );
