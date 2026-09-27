@@ -38,6 +38,7 @@ ark-relations.workspace = true
 ark-serialize.workspace = true
 ark-std.workspace = true
 mirage-relation = { path = "../relation" }
+mirage-encoding = { path = "../encoding", optional = true }
 num-bigint = { version = "0.4", default-features = false }
 hex = { workspace = true, optional = true }
 # Renders the Solidity verifier from gnark's template. Builds against
@@ -50,7 +51,7 @@ taceo-groth16-sol = { version = "0.4.2", optional = true }
 default = ["export", "parallel"]
 # The binaries: Solidity rendering, trace printing, hex reporting. Off for an
 # enclave build, which needs only the proving path.
-export = ["dep:taceo-groth16-sol", "dep:hex", "ark-std/print-trace"]
+export = ["dep:mirage-encoding", "dep:taceo-groth16-sol", "dep:hex", "ark-std/print-trace"]
 # Rayon-backed multicore proving. Off by default under Fortanix EDP, where
 # thread spawning is constrained by the enclave's provisioned TCS count.
 parallel = [

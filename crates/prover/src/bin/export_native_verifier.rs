@@ -37,7 +37,31 @@ fn main() {
     std::fs::create_dir_all(&out).expect("create contracts/");
 
     let bounds = NativeBounds::default();
-    let witness = fixture::genuine();
+    let mut witness = fixture::genuine();
+    if std::env::args().any(|arg| arg == "--gas-sim") {
+        let escrow: [u8; 20] = hex::decode("1c81a61a407017c58397a47d2ab28191b9b8ec9b")
+            .unwrap()
+            .try_into()
+            .unwrap();
+        witness.intent.escrow = escrow;
+        witness.statement.escrow = escrow;
+        witness.statement.bond_start_block = 20_999_990;
+        witness.statement.bond_deadline = 21_000_015;
+        let i = &witness.intent;
+        witness.statement.intent_commitment = mirage_encoding::commitment::Intent {
+            instance_domain: i.instance_domain,
+            chain_id: i.chain_id,
+            escrow: i.escrow,
+            request_id: i.request_id,
+            row_index: i.row_index,
+            asset_kind: mirage_encoding::AssetKind::Native,
+            settlement_token: i.settlement_token,
+            recipient: i.recipient,
+            settlement_amount: i.settlement_amount,
+            salt: i.salt,
+        }
+        .commitment();
+    }
 
     // Setup. As with the ERC-20 export this is `circuit_specific_setup`, a toy:
     // spec 18.2 requires a multiparty Phase 2 producing the same artifact

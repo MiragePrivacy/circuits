@@ -1950,6 +1950,7 @@ dependencies = [
  "ark-snark",
  "ark-std 0.6.0",
  "hex",
+ "mirage-encoding",
  "mirage-relation",
  "num-bigint",
  "taceo-groth16-sol",
