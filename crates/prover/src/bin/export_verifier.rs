@@ -37,7 +37,7 @@ fn main() {
     let bounds = Bounds::default();
     let mut witness = fixture::genuine();
     if std::env::args().any(|arg| arg == "--gas-sim") {
-        witness.statement.bond_deadline = witness.statement.bond_start_block + 75;
+        witness.statement.bond_deadline = witness.statement.bond_start_block + 100;
     }
 
     // Setup. This is `circuit_specific_setup`, a toy: spec 18.2 requires a

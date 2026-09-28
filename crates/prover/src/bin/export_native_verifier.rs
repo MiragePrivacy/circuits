@@ -46,7 +46,7 @@ fn main() {
         witness.intent.escrow = escrow;
         witness.statement.escrow = escrow;
         witness.statement.bond_start_block = 20_999_990;
-        witness.statement.bond_deadline = witness.statement.bond_start_block + 75;
+        witness.statement.bond_deadline = witness.statement.bond_start_block + 100;
         let i = &witness.intent;
         witness.statement.intent_commitment = mirage_encoding::commitment::Intent {
             instance_domain: i.instance_domain,
