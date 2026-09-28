@@ -35,7 +35,10 @@ fn main() {
     std::fs::create_dir_all(&out).expect("create contracts/");
 
     let bounds = Bounds::default();
-    let witness = fixture::genuine();
+    let mut witness = fixture::genuine();
+    if std::env::args().any(|arg| arg == "--gas-sim") {
+        witness.statement.bond_deadline = witness.statement.bond_start_block + 75;
+    }
 
     // Setup. This is `circuit_specific_setup`, a toy: spec 18.2 requires a
     // multiparty Phase 2 producing the same artifact soundly. The verifier
