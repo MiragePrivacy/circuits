@@ -13,9 +13,11 @@ use std::path::PathBuf;
 use ark_bn254::Fr;
 use ark_relations::gr1cs::{ConstraintSynthesizer, ConstraintSystem};
 use mirage_relation::{
-    Bounds, IntentOpening, KeccacheckReceiptCircuit, ReceiptCircuit, StatementContext, Witness,
+    Bounds, IntentOpening, KeccacheckReceiptCircuit, StatementContext, Witness,
 };
 use serde::Deserialize;
+
+mod common;
 
 #[derive(Deserialize)]
 struct Dataset {
@@ -173,24 +175,27 @@ fn satisfies_every_mainnet_fixture() {
     assert!(!d.fixtures.is_empty(), "empty dataset");
     let b = bounds(&d);
 
-    let mut failed = Vec::new();
-    for f in &d.fixtures {
-        let cs = ConstraintSystem::<Fr>::new_ref();
-        ReceiptCircuit::prove(b, witness(f))
-            .generate_constraints(cs.clone())
-            .expect("synthesis");
-        if !cs.is_satisfied().unwrap_or(false) {
-            failed.push(format!(
-                "{} (block {}, tx {}, type {}, depth {}): {:?}",
-                f.tx_hash,
-                f.block_number,
-                f.tx_index,
-                f.receipt_type,
-                f.depth,
-                cs.which_is_unsatisfied().ok().flatten()
-            ));
-        }
-    }
+    // The production circuit: every permutation goes through Keccacheck.
+    let failed = common::run(
+        &d.fixtures,
+        |f| {
+            format!(
+                "{} (block {}, tx {}, type {}, depth {})",
+                f.tx_hash, f.block_number, f.tx_index, f.receipt_type, f.depth
+            )
+        },
+        |f| {
+            let cs = ConstraintSystem::<Fr>::new_ref();
+            KeccacheckReceiptCircuit::prove(b, witness(f))
+                .generate_constraints(cs.clone())
+                .expect("synthesis");
+            cs.finalize();
+            match cs.is_satisfied() {
+                Ok(true) => Ok(()),
+                _ => Err(format!("{:?}", cs.which_is_unsatisfied().ok().flatten())),
+            }
+        },
+    );
 
     assert!(
         failed.is_empty(),
