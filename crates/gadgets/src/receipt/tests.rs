@@ -868,3 +868,76 @@ fn forgeries_defeat_the_null_relation() {
         );
     }
 }
+
+// ------------------------------------------------- authenticated status
+
+/// A receipt with the given type prefix, status payload and no logs.
+fn status_receipt(prefix: Option<u8>, status: &[u8]) -> Vec<u8> {
+    let payload = enc_list(&[
+        enc_str(status),
+        enc_str(&[0x52, 0x08]),
+        enc_str(&[0u8; 256]),
+        enc_list(&[]),
+    ]);
+    let mut out: Vec<u8> = prefix.into_iter().collect();
+    out.extend_from_slice(&payload);
+    out
+}
+
+fn status_accepted(bytes: &[u8], claimed_len: usize) -> bool {
+    let c = ConstraintSystem::<Fr>::new_ref();
+    let buf = alloc_bounded(c.clone(), bytes, 396).unwrap();
+    let len = FpVar::new_witness(c.clone(), || Ok(Fr::from(claimed_len as u64))).unwrap();
+    super::envelope::enforce_success(&buf, &len, &Boolean::TRUE).unwrap();
+    c.is_satisfied().unwrap()
+}
+
+#[test]
+fn success_is_read_behind_every_envelope() {
+    for prefix in [None, Some(1), Some(2), Some(3), Some(4)] {
+        let r = status_receipt(prefix, &[1]);
+        assert!(status_accepted(&r, r.len()), "rejected type {prefix:?}");
+    }
+}
+
+#[test]
+fn success_rejects_failure_and_state_roots() {
+    let failed = status_receipt(Some(2), &[]);
+    assert!(!status_accepted(&failed, failed.len()), "accepted status 0");
+    let root = status_receipt(None, &[0x11; 32]);
+    assert!(!status_accepted(&root, root.len()), "accepted a state root");
+}
+
+#[test]
+fn success_rejects_unknown_envelopes_and_wrong_lengths() {
+    let r = status_receipt(Some(5), &[1]);
+    assert!(!status_accepted(&r, r.len()), "accepted type 0x05");
+    let r = status_receipt(Some(2), &[1]);
+    assert!(!status_accepted(&r, r.len() - 1), "accepted a short length");
+}
+
+#[test]
+fn success_is_inert_when_inactive() {
+    let c = ConstraintSystem::<Fr>::new_ref();
+    let buf = alloc_bounded(c.clone(), &[0xff; 40], 396).unwrap();
+    let len = FpVar::new_witness(c.clone(), || Ok(Fr::from(40u64))).unwrap();
+    super::envelope::enforce_success(&buf, &len, &Boolean::FALSE).unwrap();
+    assert!(c.is_satisfied().unwrap());
+}
+
+/// **Forgery: a typed receipt whose list header is not 0xf9.** The length
+/// bytes and status are placed where the 0xf9 layout expects them, so only
+/// the header check can reject it.
+#[test]
+fn success_rejects_a_wrong_list_header() {
+    let len = 300usize;
+    let mut r = vec![0u8; len];
+    r[0] = 0x02;
+    r[1] = 0xaa;
+    r[2] = ((len - 4) >> 8) as u8;
+    r[3] = (len - 4) as u8;
+    r[4] = 0x01;
+    assert!(!status_accepted(&r, len), "accepted header 0xaa");
+    r[1] = 0xf9;
+    assert!(status_accepted(&r, len), "the control case must pass");
+}

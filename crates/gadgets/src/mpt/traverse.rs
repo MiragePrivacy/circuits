@@ -187,7 +187,7 @@ impl Traversal {
             // Computed unconditionally: an inactive slot has zero length and
             // hashes to the empty-input digest, which will not match, so the
             // comparison is gated on `active` rather than the hash itself.
-            let digest = keccak256_var_with(&level.bytes, &level.len, &active, backend)?;
+            let digest = keccak256_var_with(&level.bytes, &level.len, backend)?;
             for (d, e) in digest.iter().zip(expected.iter()) {
                 let d_byte = bits_to_byte(d)?;
                 d_byte.conditional_enforce_equal(e, &active)?;

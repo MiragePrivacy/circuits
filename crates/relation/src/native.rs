@@ -70,7 +70,7 @@ use mirage_gadgets::transaction::{NativeIntent, NativeTransfer, TransactionRelat
 
 use crate::{
     alloc_opening, alloc_statement, enforce_bytes_equal, fixed_be_value, lt_u64, native_signals,
-    Bounds, IntentOpening, StatementContext,
+    profile, Bounds, IntentOpening, StatementContext,
 };
 
 /// What this circuit does and does not include, so the measured numbers are
@@ -111,15 +111,22 @@ pub struct NativeBounds {
 impl Default for NativeBounds {
     fn default() -> Self {
         // Six key nibbles permit six ancestors and one terminal leaf.
+        //
+        // Value bounds sit on Keccak rate boundaries for the constructed leaf
+        // (up to 11 bytes of RLP framing): 260 B transactions fit two blocks
+        // and 396 B receipts three. The largest observed bare send is 122 B,
+        // its receipt 393 B (one receive log). A Prague header with 32 B
+        // extraData and eight-byte integers is 670 B; 679 B is the last length
+        // that fits five blocks.
         let common = Bounds {
             node_bytes: 544,
             key_bytes: 3,
-            receipt_bytes: 512,
-            header_bytes: 704,
+            receipt_bytes: 396,
+            header_bytes: 679,
             depth: 7,
         };
         Self {
-            transaction_bytes: 512,
+            transaction_bytes: 260,
             transaction_node_bytes: common.node_bytes,
             transaction_depth: common.depth,
             common,
@@ -256,6 +263,7 @@ pub fn generate_constraints_with_backend<F: PrimeField, B: PermutationBackend<F>
 ) -> Result<(), SynthesisError> {
     let b = circuit.bounds;
     let w = circuit.w();
+    let mut mark = cs.num_constraints();
 
     // ---- public inputs ----
     //
@@ -303,6 +311,7 @@ pub fn generate_constraints_with_backend<F: PrimeField, B: PermutationBackend<F>
         amount: opening.settlement_amount.clone(),
     };
 
+    profile(&cs, "alloc", &mut mark);
     // ---- the relation ----
 
     // The commitment is the escrow's stored value, carried into the
@@ -316,6 +325,7 @@ pub fn generate_constraints_with_backend<F: PrimeField, B: PermutationBackend<F>
         backend,
     )?;
 
+    profile(&cs, "commitment", &mut mark);
     // This circuit proves native settlements only. `open` already enforces
     // that a native row's token is all-zero, but nothing in it fixes *which*
     // kind this is: without this the ERC-20 verification key and the native
@@ -334,22 +344,21 @@ pub fn generate_constraints_with_backend<F: PrimeField, B: PermutationBackend<F>
     enforce_bytes_equal(&opening.request_id, &ctx.request_id)?;
     enforce_bytes_equal(&opening.row_index, &ctx.row_index)?;
 
+    profile(&cs, "opening-eq", &mut mark);
     // The header supplies both roots rather than the caller. Accepting
     // caller-supplied roots would let a prover invent tries containing
     // whatever it liked.
     let parsed = header::parse_authenticated_prefix(&header_bytes, &header_len, &Boolean::TRUE)?;
 
+    profile(&cs, "header-parse", &mut mark);
     // Authenticate the header itself: parsing roots out of it is not useful
     // unless it is the exact witness block the verifier selected.
-    let header_digest = mirage_gadgets::keccak::keccak256_var_with(
-        &header_bytes,
-        &header_len,
-        &Boolean::TRUE,
-        backend,
-    )?;
+    let header_digest =
+        mirage_gadgets::keccak::keccak256_var_with(&header_bytes, &header_len, backend)?;
     for (got, want) in header_digest.iter().zip(ctx.witness_block_hash.iter()) {
         UInt8::from_bits_le(got).enforce_equal(want)?;
     }
+    profile(&cs, "header-hash", &mut mark);
     let witness_number = fixed_be_value(&ctx.witness_block_number)?;
     parsed.number.enforce_equal(&witness_number)?;
 
@@ -360,6 +369,7 @@ pub fn generate_constraints_with_backend<F: PrimeField, B: PermutationBackend<F>
     lt_u64(&bond_start, &parsed.number)?.enforce_equal(&Boolean::TRUE)?;
     lt_u64(&bond_deadline, &parsed.number)?.enforce_equal(&Boolean::FALSE)?;
 
+    profile(&cs, "lease", &mut mark);
     // Trie one: the transaction is at `key` under `transactionsRoot`. This
     // binds the exact bytes the transfer relation then reads.
     ConstructedLeafTraversal::verify_value_inclusion_with(
@@ -372,6 +382,7 @@ pub fn generate_constraints_with_backend<F: PrimeField, B: PermutationBackend<F>
         backend,
     )?;
 
+    profile(&cs, "tx-trie", &mut mark);
     // Trie two: the receipt is at the *same* key under `receiptsRoot`.
     // Sharing the key is what makes this the settling transaction's own
     // receipt rather than some other successful transaction's.
@@ -385,19 +396,21 @@ pub fn generate_constraints_with_backend<F: PrimeField, B: PermutationBackend<F>
         backend,
     )?;
 
+    profile(&cs, "receipt-trie", &mut mark);
     // The transaction pays the committed recipient the committed amount.
     NativeTransfer::verify(&transaction, &transaction_len, &intent, &Boolean::TRUE)?;
 
-    // And it succeeded. `envelope::parse` enforces `status == 1` along with
-    // the canonical four-item payload; the logs it returns are ignored,
-    // because a native transfer emits none and a call carrying value may
-    // emit any.
-    envelope::parse(&receipt, &receipt_len, &Boolean::TRUE)?;
+    profile(&cs, "native-transfer", &mut mark);
+    // And it succeeded. The receipt is authenticated at the same key, so its
+    // status sits at a fixed offset behind the envelope; logs are ignored.
+    envelope::enforce_success(&receipt, &receipt_len, &Boolean::TRUE)?;
 
+    profile(&cs, "receipt-envelope", &mut mark);
     // ---- statement hash ----
     let signals = statement::compute_with(&ctx, backend)?;
     statement::enforce(&signals, &public_hi, &public_lo, &Boolean::TRUE)?;
 
+    profile(&cs, "statement", &mut mark);
     Ok(())
 }
 
@@ -788,7 +801,7 @@ mod tests {
         generate_constraints_with_backend(NativeCircuit::setup(bounds), cs.clone(), &mut batch)
             .unwrap();
         let result = batch.finish().unwrap();
-        assert_eq!((result.recorded, result.padded), (65, 128));
+        assert_eq!((result.recorded, result.padded), (61, 64));
         assert!(cs.num_constraints() < direct_count);
         println!(
             "native constraints: direct={direct_count}, Keccacheck={}",

@@ -73,7 +73,7 @@ pub const MEASUREMENT_SCOPE: &str =
 /// This deliberately observes only `num_constraints`: it does not allocate
 /// variables or otherwise change the circuit. Optimization branches use these
 /// stable stage names so their deltas can be compared against one baseline.
-fn profile<F: PrimeField>(cs: &ConstraintSystemRef<F>, stage: &str, last: &mut usize) {
+pub(crate) fn profile<F: PrimeField>(cs: &ConstraintSystemRef<F>, stage: &str, last: &mut usize) {
     if std::env::var_os("RELATION_PROFILE").is_none() {
         return;
     }
@@ -376,12 +376,7 @@ pub fn generate_constraints_with_backend<F: PrimeField, B: PermutationBackend<F>
     // Authenticate both header identity fields carried by the statement.
     // Parsing a receiptsRoot is not useful unless the parsed header is the
     // exact witness block selected by the verifier.
-    let header_digest = mirage_gadgets::keccak::keccak256_var_with(
-        &header_bytes,
-        &header_len,
-        &Boolean::TRUE,
-        backend,
-    )?;
+    let header_digest = mirage_gadgets::keccak::keccak256_var_with(&header_bytes, &header_len, backend)?;
     for (got, want) in header_digest.iter().zip(ctx.witness_block_hash.iter()) {
         UInt8::from_bits_le(got).enforce_equal(want)?;
     }
@@ -943,7 +938,7 @@ mod tests {
             "unsatisfied: {:?}",
             cs.which_is_unsatisfied()
         );
-        assert_eq!(cs.num_constraints(), 8_097_183);
+        assert_eq!(cs.num_constraints(), 5_950_795);
     }
 
     #[test]
@@ -966,7 +961,7 @@ mod tests {
         );
         assert_eq!(result.recorded, 38);
         assert_eq!(result.padded, 64);
-        assert_eq!(cs.num_constraints(), 4_036_383);
+        assert_eq!(cs.num_constraints(), 1_889_993);
         assert!(
             cs.is_satisfied().unwrap(),
             "unsatisfied: {:?}",
@@ -1057,6 +1052,6 @@ mod tests {
         KeccacheckReceiptCircuit::setup(Bounds::default())
             .generate_constraints(cs.clone())
             .unwrap();
-        assert_eq!(cs.num_constraints(), 4_036_383);
+        assert_eq!(cs.num_constraints(), 1_889_993);
     }
 }
