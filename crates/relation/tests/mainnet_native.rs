@@ -29,9 +29,11 @@ use std::path::PathBuf;
 
 use ark_bn254::Fr;
 use ark_relations::gr1cs::{ConstraintSynthesizer, ConstraintSystem};
-use mirage_relation::native::{NativeBounds, NativeCircuit, NativeWitness};
+use mirage_relation::native::{KeccacheckNativeCircuit, NativeBounds, NativeCircuit, NativeWitness};
 use mirage_relation::{Bounds, IntentOpening, StatementContext};
 use serde::Deserialize;
+
+mod common;
 
 #[derive(Deserialize)]
 struct Dataset {
@@ -224,22 +226,22 @@ fn bare_sends_satisfy_the_compiled_bounds() {
         );
     }
 
-    let mut failed = Vec::new();
-    for f in &bare {
-        let cs = ConstraintSystem::<Fr>::new_ref();
-        NativeCircuit::prove(b, witness(f))
-            .generate_constraints(cs.clone())
-            .expect("synthesis");
-        if !cs.is_satisfied().unwrap_or(false) {
-            failed.push(format!(
-                "{} (block {}, type {}): {:?}",
-                f.tx_hash,
-                f.block_number,
-                f.transaction_type,
-                cs.which_is_unsatisfied().ok().flatten()
-            ));
-        }
-    }
+    // The production circuit: every permutation goes through Keccacheck.
+    let failed = common::run(
+        &bare,
+        |f| format!("{} (block {}, type {})", f.tx_hash, f.block_number, f.transaction_type),
+        |f| {
+            let cs = ConstraintSystem::<Fr>::new_ref();
+            KeccacheckNativeCircuit::prove(b, witness(f))
+                .generate_constraints(cs.clone())
+                .expect("synthesis");
+            cs.finalize();
+            match cs.is_satisfied() {
+                Ok(true) => Ok(()),
+                _ => Err(format!("{:?}", cs.which_is_unsatisfied().ok().flatten())),
+            }
+        },
+    );
     assert!(
         failed.is_empty(),
         "{} of {} bare sends unsatisfied at the compiled bounds:\n  {}",
