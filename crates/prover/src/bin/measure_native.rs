@@ -109,6 +109,9 @@ fn main() {
         gib(keys.pk.serialized_size(ark_serialize::Compress::Yes) as u64)
     );
     println!("peak_rss_after_setup_gib: {:.3}", gib(peak_rss()));
+    // Restart the high-water mark so the proving peak is measured on its own,
+    // with the proving key resident as it would be in production.
+    std::fs::write("/proc/self/clear_refs", "5").expect("reset peak RSS");
 
     let mut times = Vec::with_capacity(iterations);
     for i in 0..iterations {
@@ -134,5 +137,5 @@ fn main() {
         times[iterations / 2]
     };
     println!("median_prove_seconds: {median:.3}");
-    println!("peak_process_rss_gib: {:.3}", gib(peak_rss()));
+    println!("peak_prove_rss_gib: {:.3}", gib(peak_rss()));
 }
