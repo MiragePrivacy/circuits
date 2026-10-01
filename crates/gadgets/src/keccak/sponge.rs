@@ -31,16 +31,13 @@
 use ark_ff::PrimeField;
 use ark_r1cs_std::boolean::Boolean;
 use ark_r1cs_std::convert::ToBitsGadget;
-use ark_r1cs_std::eq::EqGadget;
 use ark_r1cs_std::fields::fp::FpVar;
-use ark_r1cs_std::fields::FieldVar;
-use ark_r1cs_std::select::CondSelectGadget;
 use ark_r1cs_std::uint8::UInt8;
 use ark_relations::gr1cs::SynthesisError;
 
 use super::permutation::{DirectPermutation, PermutationBackend, State};
 use super::{DELIM_KECCAK, RATE};
-use crate::bytes::{assert_zero_tail, prefix_mask};
+use crate::bytes::{assert_zero_outside, prefix_mask_exact, to_fields};
 
 /// A byte as 8 boolean signals, least-significant bit first.
 ///
@@ -140,128 +137,91 @@ pub fn keccak256_fixed_with<F: PrimeField, B: PermutationBackend<F>>(
 /// # Cost
 ///
 /// Runs `ceil((MAX + 1) / RATE)` permutations unconditionally, because the
-/// circuit cannot branch on a witness. A 300-byte receipt in a 2048-byte buffer
-/// pays for all 16 permutations, roughly 2.45M constraints.
-///
-/// That is the single largest cost lever in the relation, and it argues for
-/// tightening spec 12.9's bounds against measured mainnet receipts rather than
-/// keeping worst-case padding.
+/// circuit cannot branch on a witness. Around the permutations it costs about
+/// five constraints per buffer byte: the prefix mask (two), the zero tail
+/// (one), and placing the delimiter (two).
 ///
 /// # Construction
 ///
 /// 1. Zero-constrain the tail (spec 12.5), so padded bytes cannot contribute.
-/// 2. Build the padded message in-circuit. `DELIM_KECCAK` goes at index `len`
-///    and `0x80` at the last byte of the final rate block; when those coincide
-///    the byte is `0x81`. Both positions are witness-dependent.
+/// 2. Build the padded message in-circuit. Because the tail is zero, the
+///    message is the buffer itself with `DELIM_KECCAK` XORed in at index `len`
+///    and `0x80` at the last byte of the final rate block; only bit 0 of each
+///    byte and bit 7 of each block end ever differ from the buffer.
 /// 3. Absorb every block and permute, retaining the state after each.
-/// 4. Select the state following the block that contains the padding.
+/// 4. Select the digest of the state following the block that contains the
+///    padding.
 ///
-/// Step 4 is the subtle one. It selects the **state**, not among digests: the
-/// digest is squeezed once from the selected state. Selecting among
-/// per-block digests would let a prover aim at a later block's output.
-/// # `active`
+/// Step 4 selects by the length-derived final block, which the prover does not
+/// choose. Squeezing is a projection, so selecting the 256 digest bits of each
+/// candidate state is the same as squeezing the selected state.
 ///
-/// The tail-zero and length-bound assertions bind only when `active` is set.
-/// The traversal hashes every depth slot including inactive ones, whose length
-/// is zero and whose bytes are padding; asserting on those would reject every
-/// proof shallower than the compiled maximum.
+/// # Length
 ///
-/// The digest is always computed. Only the assertions are gated, so a caller
-/// that ignores the result of an inactive hash pays the constraints but binds
-/// nothing.
+/// `len <= MAX` and the zero tail are enforced unconditionally. A slot whose
+/// digest is ignored (an inactive trie level) must therefore still present a
+/// zero buffer and zero length, which `alloc_bounded` of an empty value does.
 pub fn keccak256_var<F: PrimeField>(
     buf: &[UInt8<F>],
     len: &FpVar<F>,
-    active: &Boolean<F>,
 ) -> Result<[Byte<F>; 32], SynthesisError> {
-    keccak256_var_with(buf, len, active, &mut DirectPermutation)
+    keccak256_var_with(buf, len, &mut DirectPermutation)
 }
 
 pub fn keccak256_var_with<F: PrimeField, B: PermutationBackend<F>>(
     buf: &[UInt8<F>],
     len: &FpVar<F>,
-    active: &Boolean<F>,
     backend: &mut B,
 ) -> Result<[Byte<F>; 32], SynthesisError> {
     let max = buf.len();
     let max_blocks = max / RATE + 1;
-
-    // 1. The tail cannot contribute.
-    assert_zero_tail(buf, len, active)?;
-
-    // 2. Padded message. It is one rate block longer than the buffer so a
-    // length that exactly fills the last block still has room for padding.
     let padded_len = max_blocks * RATE;
-    let sel = prefix_mask(len, padded_len, active)?;
 
-    // is_delim[i] = 1 exactly at i == len.
-    let mut is_delim = Vec::with_capacity(padded_len);
-    for i in 0..padded_len {
-        is_delim.push(len.is_eq(&FpVar::constant(F::from(i as u64)))?);
-    }
+    // 1. sel[i] = [i < len], and nothing past len.
+    let mut sel = prefix_mask_exact(len, max)?;
+    assert_zero_outside(&to_fields(buf)?, &sel)?;
+    sel.resize(padded_len, Boolean::FALSE);
 
-    // The final block index is floor(len / RATE); 0x80 lands at the last byte
-    // of that block. Derive it from the mask rather than dividing: position i
-    // is the block end iff it is the last byte of a rate block and the padding
-    // has already started at or before it.
-    let delim = UInt8::constant(DELIM_KECCAK);
-    let pad_end = UInt8::constant(0x80);
-    let both = UInt8::constant(DELIM_KECCAK | 0x80);
-    let zero = UInt8::constant(0);
-
+    // 2. Padded message.
     let mut message = Vec::with_capacity(padded_len);
     for i in 0..padded_len {
-        // In-range real byte, or zero past the buffer.
-        let real = if i < max {
-            buf[i].clone()
-        } else {
-            zero.clone()
+        let mut byte: Byte<F> = match buf.get(i) {
+            Some(b) => to_byte(b)?,
+            None => core::array::from_fn(|_| Boolean::FALSE),
         };
+        // The delimiter sits at the mask's falling edge.
+        let is_delim = match i {
+            0 => !sel[0].clone(),
+            _ => sel[i - 1].clone() & !sel[i].clone(),
+        };
+        byte[0] = byte[0].clone() ^ is_delim;
 
-        // Is this the last byte of the block containing the padding start?
-        let is_block_end = (i + 1) % RATE == 0;
-        let in_final_block = if is_block_end {
-            // The padding started at or before this block end, and this is the
-            // first block end for which that holds. `sel[i]` is true while
-            // i < len, so the first block end with sel false is the one.
+        // The last byte of a block takes 0x80 when this is the first block end
+        // at which the padding has started.
+        if (i + 1) % RATE == 0 {
             let started = !sel[i].clone();
-            let prev_block_end = if i >= RATE { Some(i - RATE) } else { None };
-            match prev_block_end {
-                // Not already covered by an earlier block end.
-                Some(p) => started & sel[p].clone(),
+            let in_final_block = match i.checked_sub(RATE) {
+                Some(prev) => started & sel[prev].clone(),
                 None => started,
-            }
-        } else {
-            Boolean::FALSE
-        };
-
-        // Assemble: real byte inside the message, delimiter at len, 0x80 at the
-        // final block end, and 0x81 when they coincide.
-        let coincide = is_delim[i].clone() & in_final_block.clone();
-        let byte = UInt8::conditionally_select(&sel[i], &real, &zero)?;
-        let byte = UInt8::conditionally_select(&is_delim[i], &delim, &byte)?;
-        let byte = UInt8::conditionally_select(&in_final_block, &pad_end, &byte)?;
-        let byte = UInt8::conditionally_select(&coincide, &both, &byte)?;
+            };
+            byte[7] = byte[7].clone() ^ in_final_block;
+        }
         message.push(byte);
     }
 
-    // 3. Absorb every block, retaining each intermediate state.
-    let msg_bytes = to_bytes(&message)?;
+    // 3. Absorb every block, retaining each digest.
     let mut st = empty_state::<F>();
-    let mut states = Vec::with_capacity(max_blocks);
+    let mut digests = Vec::with_capacity(max_blocks);
     for b in 0..max_blocks {
-        absorb_block(&mut st, &msg_bytes[b * RATE..(b + 1) * RATE])?;
+        absorb_block(&mut st, &message[b * RATE..(b + 1) * RATE])?;
         st = backend.permute(st)?;
-        states.push(st.clone());
+        digests.push(squeeze_256(&st));
     }
 
-    // 4. Select the state after the block containing the padding, then squeeze
-    // once. The final block index is the number of block ends at or before the
-    // padding start.
-    let mut chosen = states[max_blocks - 1].clone();
+    // 4. Block b is final iff the padding started within it: sel is false at
+    // its end and true at the previous block end (or b == 0).
+    let mut chosen = digests[max_blocks - 1].clone();
     for b in (0..max_blocks - 1).rev() {
-        // Block b is final iff the padding started within it: sel is false at
-        // its end and true at the previous block end (or b == 0).
         let end = (b + 1) * RATE - 1;
         let started = !sel[end].clone();
         let is_final = if b == 0 {
@@ -269,25 +229,14 @@ pub fn keccak256_var_with<F: PrimeField, B: PermutationBackend<F>>(
         } else {
             started & sel[b * RATE - 1].clone()
         };
-        chosen = select_state(&is_final, &states[b], &chosen)?;
-    }
-
-    Ok(squeeze_256(&chosen))
-}
-
-/// Conditionally select between two sponge states, bit by bit.
-fn select_state<F: PrimeField>(
-    cond: &Boolean<F>,
-    a: &State<F>,
-    b: &State<F>,
-) -> Result<State<F>, SynthesisError> {
-    let mut out = empty_state::<F>();
-    for lane in 0..25 {
-        for bit in 0..64 {
-            out[lane][bit] = cond.select(&a[lane][bit], &b[lane][bit])?;
+        for (out, bits) in chosen.iter_mut().zip(digests[b].iter()) {
+            for (o, bit) in out.iter_mut().zip(bits.iter()) {
+                *o = is_final.select(bit, o)?;
+            }
         }
     }
-    Ok(out)
+
+    Ok(chosen)
 }
 
 #[cfg(test)]
@@ -381,7 +330,7 @@ mod tests {
         let cs = ConstraintSystem::<Fr>::new_ref();
         let buf = crate::bytes::alloc_bounded(cs.clone(), data, max).unwrap();
         let len = FpVar::new_witness(cs.clone(), || Ok(Fr::from(data.len() as u64))).unwrap();
-        let digest = keccak256_var(&buf, &len, &Boolean::TRUE).unwrap();
+        let digest = keccak256_var(&buf, &len).unwrap();
         assert_eq!(
             read_digest(&digest),
             mirage_encoding::keccak256(data),
@@ -450,7 +399,7 @@ mod tests {
         let cs2 = ConstraintSystem::<Fr>::new_ref();
         let buf = crate::bytes::alloc_bounded(cs2.clone(), &data, 512).unwrap();
         let len = FpVar::new_witness(cs2.clone(), || Ok(Fr::from(data.len() as u64))).unwrap();
-        let var = read_digest(&keccak256_var(&buf, &len, &Boolean::TRUE).unwrap());
+        let var = read_digest(&keccak256_var(&buf, &len).unwrap());
 
         assert_eq!(fixed, var);
     }
@@ -465,7 +414,7 @@ mod tests {
         data[20] = 0xff; // past the claimed length
         let buf = crate::bytes::alloc_bounded(cs.clone(), &data, 64).unwrap();
         let len = FpVar::new_witness(cs.clone(), || Ok(Fr::from(8u64))).unwrap();
-        let _ = keccak256_var(&buf, &len, &Boolean::TRUE).unwrap();
+        let _ = keccak256_var(&buf, &len).unwrap();
         assert!(!cs.is_satisfied().unwrap(), "dirty tail accepted");
     }
 
@@ -476,7 +425,7 @@ mod tests {
             let buf = crate::bytes::alloc_bounded(cs.clone(), &[0u8; 8], max).unwrap();
             let len = FpVar::new_witness(cs.clone(), || Ok(Fr::from(8u64))).unwrap();
             let before = cs.num_constraints();
-            let _ = keccak256_var(&buf, &len, &Boolean::TRUE).unwrap();
+            let _ = keccak256_var(&buf, &len).unwrap();
             let cost = cs.num_constraints() - before;
             let blocks = max / RATE + 1;
             println!("keccak_var over {max} bytes ({blocks} blocks): {cost} constraints");

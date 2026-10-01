@@ -40,6 +40,7 @@ pub mod constructed_leaf;
 pub mod constructed_traverse;
 #[cfg(test)]
 pub mod harness;
+pub mod levels;
 pub mod node;
 #[cfg(test)]
 pub mod null;

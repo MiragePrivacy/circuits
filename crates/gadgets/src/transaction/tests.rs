@@ -435,12 +435,14 @@ fn rejects_a_type_mismatched_body() {
     );
 }
 
-/// **Forgery: extra items appended to the list.**
+/// **Out of scope: extra items appended to the list.**
 ///
-/// A 13-item EIP-1559 list is not an EIP-1559 transaction. The exact count is
-/// what makes the fixed `to`/`value` indices meaningful.
+/// A 13-item EIP-1559 list is not a transaction any block can include, and the
+/// relation only sees transactions authenticated under `transactionsRoot`. The
+/// gadget reads up to `data` and does not re-count trailing items, so in
+/// isolation it accepts this; the walked prefix still fixes `to` and `value`.
 #[test]
-fn rejects_an_extra_item() {
+fn extra_items_are_left_to_inclusion() {
     let v = 1_000u128;
     let payload = enc_list(&[
         enc_int(1),
@@ -460,8 +462,8 @@ fn rejects_an_extra_item() {
     let mut tx = vec![0x02];
     tx.extend_from_slice(&payload);
     assert!(
-        !accepts_genuine_intent(&tx, &amount(v)),
-        "accepted a 13-item EIP-1559 list"
+        accepts_genuine_intent(&tx, &amount(v)),
+        "the item count is no longer re-validated in-circuit"
     );
 }
 
@@ -590,4 +592,86 @@ fn cost() {
         c.num_constraints() - before
     );
     assert!(c.is_satisfied().unwrap());
+}
+
+// ---------------------------------------------------- crafted misparses
+
+/// An EIP-1559 body from raw pieces, so a test can place bytes the RLP
+/// encoder would never produce.
+fn raw_1559(pieces: &[Vec<u8>]) -> Vec<u8> {
+    let mut tx = vec![0x02];
+    tx.extend_from_slice(&enc_list(pieces));
+    tx
+}
+
+/// **Forgery: a list where an integer belongs.** Read with the string size
+/// formula, `0xc1` claims 66 bytes instead of 2, so the walk would land on
+/// bytes the prover planted as a second, fake `to` and `value`.
+#[test]
+fn rejects_a_list_before_to() {
+    let v = 1_000u128;
+    let tx = raw_1559(&[
+        enc_int(1),
+        vec![0xc1, 0x05],
+        vec![0x00; 64],
+        enc_int(1),
+        enc_int(1),
+        enc_int(21_000),
+        enc_str(&RECIPIENT),
+        enc_int(v),
+        enc_str(&[]),
+        access_list(),
+        enc_int(0),
+        sig(),
+        sig(),
+    ]);
+    assert!(
+        !accepts_genuine_intent(&tx, &amount(v)),
+        "accepted a walk through a list-shaped integer"
+    );
+}
+
+/// **Forgery: a 21-byte `to` whose first 20 bytes are the recipient.** The
+/// trailing byte would read as a one-byte value, and the real (zero) value
+/// as empty calldata.
+#[test]
+fn rejects_a_to_longer_than_an_address() {
+    let mut to = vec![0x95];
+    to.extend_from_slice(&RECIPIENT);
+    to.push(0x01);
+    let tx = raw_1559(&[
+        enc_int(1),
+        enc_int(9),
+        enc_int(1),
+        enc_int(1),
+        enc_int(21_000),
+        to,
+        enc_int(0),
+        enc_str(&[]),
+        access_list(),
+        enc_int(0),
+        sig(),
+        sig(),
+    ]);
+    assert!(
+        !accepts_genuine_intent(&tx, &amount(1)),
+        "accepted a 21-byte to as the recipient"
+    );
+}
+
+/// **Forgery: a list header that is not the canonical long form.** The
+/// header byte fixes where the items start; any other byte must fail.
+#[test]
+fn rejects_a_non_canonical_list_header() {
+    let v = 1_000u128;
+    let tx = transaction(Some(0x02), &RECIPIENT, v);
+    assert_eq!(tx[1], 0xf8, "fixture should use a one-byte length");
+    for header in [0xc0u8, 0xf7, 0xfa] {
+        let mut bad = tx.clone();
+        bad[1] = header;
+        assert!(
+            !accepts_genuine_intent(&bad, &amount(v)),
+            "accepted list header {header:#x}"
+        );
+    }
 }

@@ -10,303 +10,155 @@
 //! 0x02     12   5      6     7   EIP-1559
 //! ```
 //!
-//! One cursor walks the selected envelope. The final three positions are
-//! gated by its exact item count; recipient/value/data indices are selected
-//! from the shared decoded items.
+//! # What is and is not re-validated
+//!
+//! The transaction reaching this gadget is the value of a leaf the caller has
+//! already authenticated under the header's `transactionsRoot`, so its bytes
+//! are exactly a transaction some block included. Consensus clients reject
+//! non-canonical RLP and wrong item counts, so re-proving the whole list
+//! structure in-circuit would only re-check what inclusion already implies.
+//!
+//! What remains is everything that fixes *meaning*: the envelope type, the
+//! list closing at the transaction's length, the prefix of every item walked
+//! on the way to `to`, `to` being a 20-byte string, `value` being a minimal
+//! integer of at most 32 bytes, and `data` being empty. Items past `data`
+//! (access list, signature) are never read.
+//!
+//! All reads are field-level shifts over the buffer: five one-byte reads walk
+//! the items before `to`, and one 55-byte window covers `to`, `value` and the
+//! `data` prefix.
 
 use ark_ff::PrimeField;
 use ark_r1cs_std::boolean::Boolean;
+use ark_r1cs_std::convert::ToBitsGadget;
 use ark_r1cs_std::eq::EqGadget;
 use ark_r1cs_std::fields::fp::FpVar;
 use ark_r1cs_std::fields::FieldVar;
-use ark_r1cs_std::select::CondSelectGadget;
 use ark_r1cs_std::uint8::UInt8;
 use ark_relations::gr1cs::SynthesisError;
 
 use super::NativeIntent;
-use crate::bytes::{le, one_hot, select_byte_with, select_bytes, zero_like};
-use crate::rlp::{cursor::Cursor, Item, RlpDecoder};
+use crate::bytes::{field_to_byte, prefix_mask_exact, shift_window, to_fields};
 
-/// A supported envelope, its item count, and the indices of `to` and `value`.
-///
-/// Ordered legacy first so the table reads like the spec's.
-const SHAPES: [Shape; 3] = [
-    Shape {
-        prefix: None,
-        items: 9,
-        to: 3,
-        value: 4,
-        data: 5,
-    },
-    Shape {
-        prefix: Some(0x01),
-        items: 11,
-        to: 4,
-        value: 5,
-        data: 6,
-    },
-    Shape {
-        prefix: Some(0x02),
-        items: 12,
-        to: 5,
-        value: 6,
-        data: 7,
-    },
-];
+/// Items preceding `to` in the longest supported layout (EIP-1559).
+const MAX_ITEMS_BEFORE_TO: usize = 5;
 
-struct Shape {
-    /// `None` for legacy, which carries no EIP-2718 type prefix.
-    prefix: Option<u8>,
-    items: usize,
-    to: usize,
-    value: usize,
-    data: usize,
+/// `to` prefix and address, `value` prefix and up to 32 payload bytes, and the
+/// `data` prefix.
+const WINDOW: usize = 1 + 20 + 1 + 32 + 1;
+
+fn constant<F: PrimeField>(v: u64) -> FpVar<F> {
+    FpVar::constant(F::from(v))
 }
 
-/// The fields the native relation reads, selected across the envelope shapes.
-pub struct Fields<F: PrimeField> {
-    /// The `to` item. Its payload is the 20-byte recipient.
-    pub to: Item<F>,
-    /// The `value` item. Its payload is a canonical big-endian integer.
-    pub value: Item<F>,
-    /// The `data` item, which a settlement must leave empty.
-    pub data: Item<F>,
-}
-
-/// Parses the envelope and returns the items the relation reads.
-///
-/// Enforced here:
-/// - a supported envelope: an RLP list header, or a type prefix of `0x01` or
-///   `0x02`
-/// - the exact item count that envelope's type fixes, tiling the list
-/// - the payload closing exactly at the transaction's real length
-///
-/// The field assertions are [`enforce_transfer`]'s job, so that a
-/// caller can parse without committing to an intent.
-pub fn parse<F: PrimeField>(
+/// Proves the transaction is a supported envelope that pays `intent` with
+/// empty calldata. Every assertion binds only when `active`.
+pub fn verify<F: PrimeField>(
     transaction: &[UInt8<F>],
     transaction_len: &FpVar<F>,
-    active: &Boolean<F>,
-) -> Result<Fields<F>, SynthesisError> {
-    let zero = zero_like(transaction)?;
-
-    // The first byte decides the shape.
-    let sel = one_hot(&zero, transaction.len())?;
-    let first = select_byte_with(transaction, &sel)?;
-
-    // A legacy transaction starts with an RLP list header, 0xc0 or above. Read
-    // it from the byte's own bits: bits 7 and 6 both set means >= 0xc0.
-    let is_list_header = {
-        use ark_r1cs_std::convert::ToBitsGadget;
-        let bits = first.to_bits_le()?;
-        bits[7].clone() & bits[6].clone()
-    };
-
-    // One selector per shape. The typed ones test the prefix byte directly;
-    // legacy is the list-header case.
-    //
-    // Testing each prefix positively is what excludes 0x03 and 0x04: an
-    // unsupported type matches no shape, so the exactly-one check below fails
-    // closed. A range test would have admitted them.
-    let mut is_shape = Vec::with_capacity(SHAPES.len());
-    for shape in &SHAPES {
-        is_shape.push(match shape.prefix {
-            None => is_list_header.clone(),
-            Some(t) => first.is_eq(&UInt8::constant(t))?,
-        });
-    }
-
-    // Exactly one shape, positively. Anything else fails closed.
-    //
-    // The shapes are mutually exclusive by construction — 0x01 and 0x02 are
-    // distinct and both below 0xc0 — so summing the selectors and requiring 1
-    // gives both "at least one" and "at most one" in a single constraint.
-    let mut matched = FpVar::zero();
-    for hit in &is_shape {
-        matched += FpVar::from(hit.clone());
-    }
-    matched.conditional_enforce_equal(&FpVar::one(), active)?;
-
-    // Share the RLP walk across layouts instead of decoding 9 + 11 + 12
-    // items speculatively. Each active child is canonical and contained, and
-    // the selected count must tile the outer list exactly.
-    let typed = is_shape[1].clone() | is_shape[2].clone();
-    let payload_at = &zero + FpVar::from(typed);
-    let list = Cursor::decode_item(transaction, &payload_at, active)?;
-    list.is_list
-        .conditional_enforce_equal(&Boolean::TRUE, active)?;
-    let list_end = list.end();
-    list_end.conditional_enforce_equal(transaction_len, active)?;
-    let mut cursor = list.offset.clone();
-    let mut items = Vec::with_capacity(12);
-    for i in 0..12 {
-        let mut present = Boolean::FALSE;
-        for (shape, hit) in SHAPES.iter().zip(&is_shape) {
-            if i < shape.items {
-                present |= hit;
-            }
-        }
-        let child_active = active.clone() & present;
-        let child = Cursor::decode_item(transaction, &cursor, &child_active)?;
-        let child_end = child.end();
-        le(&child_end, &list_end)?.conditional_enforce_equal(&Boolean::TRUE, &child_active)?;
-        cursor = FpVar::conditionally_select(&child_active, &child_end, &cursor)?;
-        items.push(child);
-    }
-    cursor.conditional_enforce_equal(&list_end, active)?;
-
-    let mut to: Option<Item<F>> = None;
-    let mut value: Option<Item<F>> = None;
-    let mut data: Option<Item<F>> = None;
-    for (shape, hit) in SHAPES.iter().zip(&is_shape) {
-        to = Some(match to {
-            None => items[shape.to].clone(),
-            Some(prev) => select_item(hit, &items[shape.to], &prev)?,
-        });
-        value = Some(match value {
-            None => items[shape.value].clone(),
-            Some(prev) => select_item(hit, &items[shape.value], &prev)?,
-        });
-        data = Some(match data {
-            None => items[shape.data].clone(),
-            Some(prev) => select_item(hit, &items[shape.data], &prev)?,
-        });
-    }
-
-    Ok(Fields {
-        to: to.expect("SHAPES is non-empty"),
-        value: value.expect("SHAPES is non-empty"),
-        data: data.expect("SHAPES is non-empty"),
-    })
-}
-
-/// Enforces that the parsed transaction pays the committed intent.
-///
-/// - `to` is exactly 20 bytes and equals the committed recipient
-/// - `value` equals the committed amount
-/// - `data` is empty: a bare send, not a call
-///
-/// The `to` length check is what rejects a contract creation, whose `to` is the
-/// empty string. Without it a creation's zero-length `to` would read as zero
-/// bytes out of the buffer and could be matched against a zero recipient — and
-/// while the commitment already forbids a zero recipient, relying on that would
-/// make this relation sound only by a neighbour's constraint.
-pub fn enforce_transfer<F: PrimeField>(
-    transaction: &[UInt8<F>],
-    fields: &Fields<F>,
     intent: &NativeIntent<F>,
     active: &Boolean<F>,
 ) -> Result<(), SynthesisError> {
+    assert!(transaction.len() >= 4, "transaction buffer too small");
     assert_eq!(intent.recipient.len(), 20, "recipient must be 20 bytes");
     assert_eq!(intent.amount.len(), 32, "amount must be 32 bytes");
 
-    // `to` is a 20-byte string. A creation's `to` is empty and is rejected
-    // here.
-    fields
-        .to
-        .payload_len
-        .conditional_enforce_equal(&FpVar::constant(F::from(20u64)), active)?;
-    for (got, want) in select_bytes(transaction, &fields.to.offset, 20)?
-        .iter()
-        .zip(intent.recipient.iter())
-    {
-        got.conditional_enforce_equal(want, active)?;
+    // An inactive caller may pass anything. Zeroing the buffer keeps every
+    // derived offset small, so the shifts stay satisfiable.
+    let mut tx = to_fields(transaction)?;
+    if !matches!(active, Boolean::Constant(true)) {
+        let gate = FpVar::from(active.clone());
+        tx = tx.iter().map(|b| b * &gate).collect();
+    }
+    let first = field_to_byte(&tx[0])?.to_bits_le()?;
+
+    // The first byte decides the shape: a list header (legacy), or a type
+    // prefix tested positively. Any other first byte must itself be the list
+    // header below, so 0x03, 0x04 and unknown types fail that check; exactly
+    // one of the three selectors is then set.
+    let legacy = first[7].clone() & first[6].clone();
+    let type1 = tx[0].is_eq(&FpVar::one())?;
+    let type2 = tx[0].is_eq(&constant(2))?;
+    let (legacy, type1, type2) = (
+        FpVar::from(legacy),
+        FpVar::from(type1),
+        FpVar::from(type2),
+    );
+    let typed = &type1 + &type2;
+
+    // A signed transaction's payload is at least 56 bytes and the buffer keeps
+    // it below 64 KiB, so the list header is 0xf8 or 0xf9.
+    let at = |k: usize| &tx[k] + &typed * (&tx[k + 1] - &tx[k]);
+    let header = at(0);
+    let wide = FpVar::from(header.is_eq(&constant(0xf9))?);
+    header.conditional_enforce_equal(&(constant::<F>(0xf8) + &wide), active)?;
+    let len_hi = at(1);
+    let payload = &len_hi + &wide * (&len_hi * constant::<F>(255) + at(2));
+    let start = &typed + constant::<F>(2) + &wide;
+    (&start + &payload).conditional_enforce_equal(transaction_len, active)?;
+
+    // Walk the items before `to`. Each is an integer: a single byte below
+    // 0x80, or a short string.
+    let mut cursor = start;
+    let mut offsets = Vec::with_capacity(MAX_ITEMS_BEFORE_TO + 1);
+    offsets.push(cursor.clone());
+    for _ in 0..MAX_ITEMS_BEFORE_TO {
+        let prefix = &shift_window(&tx, &cursor, 1)?[0];
+        let bits = field_to_byte(prefix)?.to_bits_le()?;
+        let long_or_list =
+            bits[7].clone() & (bits[6].clone() | (bits[5].clone() & bits[4].clone() & bits[3].clone()));
+        long_or_list.conditional_enforce_equal(&Boolean::FALSE, active)?;
+        let size = FpVar::one() + FpVar::from(bits[7].clone()) * (prefix - constant::<F>(0x80));
+        cursor += size;
+        offsets.push(cursor.clone());
+    }
+    let to_at = &legacy * &offsets[3] + &type1 * &offsets[4] + &type2 * &offsets[5];
+    let w = shift_window(&tx, &to_at, WINDOW)?;
+
+    // `to` is a 20-byte string. A creation's empty `to` (0x80) and a
+    // list-shaped `to` are both rejected here.
+    w[0].conditional_enforce_equal(&constant(0x94), active)?;
+    for (got, want) in w[1..21].iter().zip(intent.recipient.iter()) {
+        got.conditional_enforce_equal(&crate::bytes::byte_to_field(want)?, active)?;
+    }
+
+    // `value`: a bare byte below 0x80 is its own one-byte payload; otherwise a
+    // short string. The amount comparison below bounds it to 32 bytes.
+    let value_prefix = field_to_byte(&w[21])?;
+    let prefixed = FpVar::from(value_prefix.to_bits_le()?[7].clone());
+    let value_prefix = &w[21];
+    let value_len = FpVar::one() + &prefixed * (value_prefix - constant::<F>(0x81));
+    let value_at = constant::<F>(21) + &prefixed;
+    let value_end = &value_at + &value_len;
+
+    // Minimal encoding: no leading zero byte. Without it `0x82 0x00 0x01` and
+    // `0x01` both encode 1 and the right-alignment below reads the padded form
+    // a byte apart.
+    let lead = &w[22] + (FpVar::one() - &prefixed) * (&w[21] - &w[22]);
+    let empty = value_len.is_zero()?;
+    let lead_zero = lead.is_zero()?;
+    (!empty & lead_zero).conditional_enforce_equal(&Boolean::FALSE, active)?;
+
+    // Compare against the committed amount right-aligned. Both halves are
+    // assertions about the commitment: inside the payload its bytes match,
+    // outside they are zero. Comparing a read against zero outside the payload
+    // would be vacuous, since a read there already yields zero.
+    let mut padded = vec![FpVar::zero(); 10];
+    padded.extend(w.iter().cloned());
+    let tail = shift_window(&padded, &(&value_end - constant::<F>(22)), 32)?;
+    // Requires `value_len <= 32`.
+    let leading = prefix_mask_exact(&(constant::<F>(32) - &value_len), 32)?;
+    for ((want, got), zero) in intent.amount.iter().zip(tail.iter()).zip(leading.iter()) {
+        let kept = got - FpVar::from(zero.clone()) * got;
+        crate::bytes::byte_to_field(want)?.conditional_enforce_equal(&kept, active)?;
     }
 
     // `data` is empty: the settlement is a bare send.
     //
-    // A node settles by sending ETH directly, so calldata never appears on a
-    // real settlement. Enforcing that here rather than trusting the enclave to
-    // produce it is what makes the compiled bounds structural: a call carrying
-    // value has an unbounded payload and a receipt that may carry any number of
-    // logs, measured on mainnet at 7KB and 21KB against bare sends' 122 and 393
-    // bytes. Left unconstrained, the relation would accept settlements whose
-    // buffers no machine can allocate — 213M constraints at the observed p90,
-    // roughly 598 GB.
-    //
-    // The trade is the usual one: a settlement that attaches calldata becomes
-    // unprovable, and spec 12.9 puts that on the executor. That is the right
-    // side to fail on, because the alternative is a settlement that is
-    // *accepted* by the circuit and still cannot be proven.
-    fields
-        .data
-        .payload_len
-        .conditional_enforce_equal(&FpVar::zero(), active)?;
-
-    // `value` is a canonical big-endian RLP integer, so at most 32 payload
-    // bytes. Longer is not an amount this relation can compare.
-    let fits = le(&fields.value.payload_len, &FpVar::constant(F::from(32u64)))?;
-    fits.conditional_enforce_equal(&Boolean::TRUE, active)?;
-
-    // Minimal encoding: no leading zero byte.
-    //
-    // The RLP decoder does not supply this. Its canonical-form checks govern
-    // *length* bytes and the one-byte-string case; the payload of a string item
-    // is arbitrary bytes as far as RLP is concerned, and minimality is an
-    // integer rule layered on top. Without it `0x82 0x00 0x01` and `0x01` both
-    // encode 1, and the right-alignment reads the padded form shifted by a
-    // byte, so a prover picks which amount the commitment appears to name.
-    let has_payload = le(&FpVar::one(), &fields.value.payload_len)?;
-    let first = select_byte(transaction, &fields.value.offset, &has_payload)?;
-    let first_is_zero = first.is_eq(&UInt8::constant(0))?;
-    (has_payload & first_is_zero).conditional_enforce_equal(&Boolean::FALSE, active)?;
-
-    // Compare against the committed 32-byte amount right-aligned: an RLP
-    // integer is minimally encoded, so a 6-byte value must match the low 6
-    // bytes of the commitment and the high 26 must be zero.
-    //
-    // Both halves of that are assertions about the commitment, not about what
-    // was read. Comparing the *read* byte against zero outside the payload
-    // would be vacuous — an out-of-range read already yields zero — so a
-    // zero-value transaction would satisfy any commitment at all.
-    for (i, want) in intent.amount.iter().enumerate() {
-        // Commitment byte i is at value-payload position i - (32 - len), which
-        // exists only once i has passed the leading zeros.
-        let from_end = FpVar::constant(F::from((32 - i) as u64));
-        let within = le(&from_end, &fields.value.payload_len)?;
-
-        // Read the payload byte that lines up with commitment byte i. When the
-        // value is shorter, the offset falls before the payload and the read is
-        // suppressed to zero.
-        let at = &fields.value.offset + &fields.value.payload_len - &from_end;
-        let got = select_byte(transaction, &at, &within)?;
-
-        // Inside the payload the bytes must match; outside, the *commitment*
-        // byte must be zero. `got` is zero there either way, so requiring
-        // `want == got` covers both cases in one constraint.
-        want.conditional_enforce_equal(&got, active)?;
-    }
-
+    // A call carrying value has an unbounded payload and a receipt that may
+    // carry any number of logs, measured on mainnet at 7KB and 21KB against
+    // bare sends' 122 and 393 bytes. Enforcing this is what makes the compiled
+    // bounds structural rather than a policy the enclave must uphold.
+    shift_window(&w, &value_end, 1)?[0].conditional_enforce_equal(&constant(0x80), active)?;
     Ok(())
-}
-
-/// Reads `buf[at]`, or zero when `live` is false.
-///
-/// The offset is only meaningful inside the payload, and an out-of-range read
-/// already yields zero, but computing it against a wrapped-around offset would
-/// read an unrelated byte. Zeroing the index keeps the discarded reads pinned
-/// to `buf[0]`-or-nothing rather than somewhere a prover chooses.
-fn select_byte<F: PrimeField>(
-    buf: &[UInt8<F>],
-    at: &FpVar<F>,
-    live: &Boolean<F>,
-) -> Result<UInt8<F>, SynthesisError> {
-    let guarded = FpVar::conditionally_select(live, at, &FpVar::zero())?;
-    let sel = one_hot(&guarded, buf.len())?;
-    let byte = select_byte_with(buf, &sel)?;
-    UInt8::conditionally_select(live, &byte, &UInt8::constant(0))
-}
-
-/// Selects between two decoded items.
-fn select_item<F: PrimeField>(
-    cond: &Boolean<F>,
-    a: &Item<F>,
-    b: &Item<F>,
-) -> Result<Item<F>, SynthesisError> {
-    Ok(Item {
-        offset: FpVar::conditionally_select(cond, &a.offset, &b.offset)?,
-        payload_len: FpVar::conditionally_select(cond, &a.payload_len, &b.payload_len)?,
-        header_len: FpVar::conditionally_select(cond, &a.header_len, &b.header_len)?,
-        is_list: Boolean::conditionally_select(cond, &a.is_list, &b.is_list)?,
-    })
 }

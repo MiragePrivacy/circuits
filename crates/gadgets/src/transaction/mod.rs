@@ -60,25 +60,13 @@
 //! lets the `to` account execute delegated code, so `to`/`value` no longer
 //! describe the settlement on their own.
 //!
-//! # Why all three shapes are decoded
+//! # Parsing an authenticated transaction
 //!
-//! The three layouts have different item counts (9, 11, 12) and put `to` and
-//! `value` at different indices. `decode_list` enforces an exact count, so one
-//! decode cannot cover all three: a 12-item decode of a legacy transaction does
-//! not return a wrong answer, it emits a false constraint, and false
-//! constraints do not select away.
-//!
-//! So each shape is decoded under its own `active` flag and the results are
-//! selected on the envelope type. R1CS pays for all three regardless, which is
-//! the same trade the MPT traversal makes between branch and short nodes.
-//!
-//! # Cost note
-//!
-//! Three speculative `decode_list` calls is 32 `decode_item` calls over the
-//! transaction buffer, so `MAX_TRANSACTION_BYTES` governs this module the way
-//! `MAX_RECEIPT_BYTES` governs the receipt relation. The bound is the reason
-//! `data` is not walked: a bare send's payload is empty, and the relation reads
-//! `to` and `value` at positions the decode already produced.
+//! The three layouts differ only in how many integer items precede `to`. The
+//! envelope type selects which walked offset is `to`, and everything after it
+//! is read from one window. Structural re-validation that consensus already
+//! guarantees for an included transaction (item count, canonical lengths of
+//! unread fields) is not repeated; see [`envelope`].
 
 pub mod envelope;
 
@@ -109,9 +97,9 @@ pub trait TransactionRelation<F: PrimeField> {
     /// `transaction` is the bounded buffer and `transaction_len` its real
     /// length.
     ///
-    /// Must enforce: a supported envelope, a canonical payload with the item
-    /// count its type fixes, `to` present and 20 bytes, `to` equal to the
-    /// committed recipient, and `value` equal to the committed amount.
+    /// Must enforce: a supported envelope, `to` present and 20 bytes, `to`
+    /// equal to the committed recipient, `value` equal to the committed amount,
+    /// and empty `data`. The caller must have authenticated the transaction.
     fn verify(
         transaction: &[UInt8<F>],
         transaction_len: &FpVar<F>,
@@ -130,7 +118,6 @@ impl<F: PrimeField> TransactionRelation<F> for NativeTransfer {
         intent: &NativeIntent<F>,
         active: &Boolean<F>,
     ) -> Result<(), SynthesisError> {
-        let fields = envelope::parse(transaction, transaction_len, active)?;
-        envelope::enforce_transfer(transaction, &fields, intent, active)
+        envelope::verify(transaction, transaction_len, intent, active)
     }
 }

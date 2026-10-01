@@ -39,6 +39,40 @@ pub struct Payload<F: PrimeField> {
 /// `logsBloom` is fixed at 256 bytes by consensus.
 pub const BLOOM_BYTES: u64 = 256;
 
+/// Enforces `status == 1` on a receipt the caller has authenticated.
+///
+/// An included receipt is consensus-encoded, so its layout follows from the
+/// first byte alone: an optional type prefix, a `0xf9` list header (the bloom
+/// alone makes the payload at least 256 bytes), then the status item. Success
+/// is the single byte `0x01`; failure is `0x80`, and a pre-Byzantium state
+/// root starts `0xa0`, so both are rejected. An unknown envelope fails the
+/// header check, and the list must close at `receipt_len`.
+///
+/// Five fixed-offset reads, against the full payload walk of [`parse`].
+pub fn enforce_success<F: PrimeField>(
+    receipt: &[UInt8<F>],
+    receipt_len: &FpVar<F>,
+    active: &Boolean<F>,
+) -> Result<(), SynthesisError> {
+    assert!(receipt.len() >= 5, "receipt buffer too small");
+    let r = crate::bytes::to_fields(&receipt[..5])?;
+    let constant = |v: u64| FpVar::constant(F::from(v));
+
+    // A type prefix is 0x01-0x04; anything else must itself be the legacy
+    // list header, which the 0xf9 check below then requires. That check is
+    // what rejects an unknown envelope.
+    let mut typed = FpVar::zero();
+    for t in 1..=4 {
+        typed += FpVar::from(r[0].is_eq(&constant(t))?);
+    }
+
+    let at =|k: usize| &r[k] + &typed * (&r[k + 1] - &r[k]);
+    at(0).conditional_enforce_equal(&constant(0xf9), active)?;
+    let payload = at(1) * constant(256) + at(2);
+    (typed.clone() + constant(3) + payload).conditional_enforce_equal(receipt_len, active)?;
+    at(3).conditional_enforce_equal(&FpVar::one(), active)
+}
+
 /// Parses the envelope and payload, enforcing everything spec 12.6.1 requires
 /// except the log contents.
 ///
