@@ -102,6 +102,10 @@ fn main() {
             .expect("setup")
     };
     let setup_secs = t.elapsed().as_secs_f64();
+    let setup_peak = peak_rss();
+    // Restart the high-water mark so the proving peak is measured on its own,
+    // with the proving key resident as it would be in production.
+    std::fs::write("/proc/self/clear_refs", "5").expect("reset peak RSS");
     let pk_bytes = pk.serialized_size(ark_serialize::Compress::No);
     let pk_compressed = pk.serialized_size(ark_serialize::Compress::Yes);
     println!(
@@ -140,7 +144,8 @@ fn main() {
     assert!(ok, "proof did not verify");
 
     println!();
-    println!("peak RSS:     {:.1} GB", gb(peak_rss()));
+    println!("setup peak:   {:.1} GB", gb(setup_peak));
+    println!("prove peak:   {:.1} GB", gb(peak_rss()));
     println!(
         "proof size:   {} bytes",
         proof.serialized_size(ark_serialize::Compress::Yes)
