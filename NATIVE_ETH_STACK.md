@@ -1,6 +1,111 @@
 # Native ETH with Keccacheck
 
-## Structural optimizations (2026-09-22)
+## Field-level parsing and current-network bounds (2026-10-01)
+
+| Stage | Before | After |
+|---|---:|---:|
+| Transaction trie | 2,269,547 | 101,779 |
+| Receipt trie | 2,269,547 | 107,446 |
+| Transaction relation | 577,846 | 4,243 |
+| Receipt status | 151,942 | 15 |
+| Header hash | 46,183 | 18,163 |
+| Witness allocation | 65,420 | 62,276 |
+| Keccacheck verifier | 1,932,960 (65 -> 128) | 1,738,717 (61 -> 64) |
+| **Total** | **7,327,757** | **2,046,951** |
+
+The shared gadgets also reduce the ERC-20 Keccacheck relation from
+4,036,383 to 1,889,993 constraints (direct control: 8,097,183 to 5,950,795),
+with no ERC-20-specific change. Both need new proving keys and verifiers.
+
+What changed:
+
+- **Field-level byte reads.** `select_byte_with`/`select_bytes` previously
+  selected bit by bit, eight constraints per buffer position per byte read.
+  They now take one product per position and one recomposition per output.
+  Reads at offsets known to be in range use `shift_window`, a log-depth
+  shifter: a 32-byte read from a 532-byte node costs ~1.3k instead of ~133k.
+- **Variable-length Keccak.** The tail is zero, so the padded message is the
+  buffer with the delimiter and final pad bit XORed in; only the 256 digest
+  bits are selected across blocks. About five constraints per buffer byte
+  instead of ~40. Length bound and zero tail are now unconditional, which
+  inactive trie slots already satisfy.
+- **Branch nodes from occupancy bits.** Sixteen witnessed occupancy bits fix
+  every slot offset and the list header; slot `i` is checked against its
+  `i + 1` possible positions. Replaces 16 cursor reads and two general RLP
+  decodes per level.
+- **Extensions from the key.** An extension's bytes up to its hash follow from
+  the key and its path length, so it is compared against the key instead of
+  decoded and path-matched.
+- **Leaf framing at field level.** The at-most-11-byte RLP framing is built
+  from selectors and the value is shifted into place in four stages. ERC-20
+  and native leaves share this general encoder.
+- **Authenticated transaction and receipt parsing.** Both are leaf values the
+  trie has bound to a block the escrow selected, so consensus already
+  guarantees canonical encoding. The transaction gadget checks the envelope
+  type, the list closing at the length, the prefix of each item walked up to
+  `to`, a 20-byte `to`, a minimal value of at most 32 bytes compared
+  right-aligned, and empty `data`; it no longer re-counts trailing items. The
+  receipt check reads the status at its fixed offset behind a positively
+  tested envelope and a list closing at the length.
+- **Bounds for current mainnet.** Header 679 B (a Prague header with 32 B
+  extraData and eight-byte integers is 670 B), transaction 260 B (largest
+  observed bare send 122 B), receipt 396 B (largest observed 393 B). Each sits
+  on a Keccak block boundary; together they bring the batch to 61
+  permutations, padded to 64.
+
+### Host benchmark (2026-10-01)
+
+One setup and one proof per circuit, Intel Core i9-14900HX, 16 Rayon threads,
+release build with `+bmi2,+adx`. Setup peak is measured over constraint
+counting and setup; the high-water mark is then reset, so the proving peak is
+proving alone with the proving key resident. Measured at 2,046,965 native
+constraints, before 14 redundant envelope constraints were removed.
+
+| Metric | ERC-20 | Native |
+|---|---:|---:|
+| Constraints | 1,889,993 | 2,046,951 |
+| Setup | 21.2 s | 22.5 s |
+| Setup peak RSS | 8.6 GiB | 9.1 GiB |
+| Proof (native includes self-verification) | 21.2 s | 22.1 s |
+| Proving peak RSS | 9.8 GiB | 10.5 GiB |
+| Proving key, uncompressed / compressed | 0.69 / 0.34 GiB | 0.73 / 0.37 GiB |
+
+About 14 s of each proof and of each setup is arkworks' `Inline/Outline LCs`
+pass; the witness map and multiscalar multiplications take ~6 s.
+
+Reproduce with `RAYON_NUM_THREADS=16 cargo run -p mirage-prover --release --bin
+measure-native -- --iterations 1` and `... --bin measure -- --keccacheck`.
+
+### Validation
+
+- All 100 bare-send native fixtures and all 100 ERC-20 fixtures satisfy the
+  production Keccacheck circuits at the compiled bounds. The fixture tests run
+  in parallel (`FIXTURE_JOBS`, default from available memory at 9 GiB per job)
+  and print one line per fixture; each takes about 8 minutes on 9 jobs.
+- Every `enforce` in the new gadgets was deleted in turn and the gadget suite
+  rerun; each deletion fails at least one test. The exception is the leaf
+  header's `hi`/`lo` recomposition, whose only exploit would need a full
+  coherent forged witness and which the leaf hash already pins.
+- Internal witness bindings (`field_to_byte`, `to_bits_bounded`,
+  `prefix_mask_exact`) are tested by editing the finalized assignment directly,
+  since honest witness generation never exercises them. Symbolic linear
+  combinations cache their values, so such tests must finalize and clear
+  `lc_assignment` before checking.
+- `EscrowNativeZK` and `EscrowERC20` derive `witnessBlockHash` from
+  `blockhash(witnessBlockNumber)` on-chain, which is what the authenticated
+  transaction and receipt parsing relies on.
+
+### Remaining cost
+
+The Keccacheck verifier is now 85% of the circuit, and ~90% of the verifier is
+its Poseidon2 transcript: 2,836 width-16 permutations at ~550 constraints.
+Reducing that needs a different transcript hash or sponge width on both
+sides, i.e. a fork of the pinned prover. The relation itself is ~308k, mostly
+the 61 permutation output states (1,600 boolean witnesses each) and their
+absorb XORs.
+
+
+## Structural optimizations (2026-09-22, superseded)
 
 The native circuit now applies the base circuit's authenticated header prefix,
 constructed terminal leaves, structural ancestor bounds, and universal depth
