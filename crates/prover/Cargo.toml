@@ -37,6 +37,8 @@ ark-ec.workspace = true
 ark-relations.workspace = true
 ark-serialize.workspace = true
 ark-std.workspace = true
+ark-poly = { version = "0.6", default-features = false }
+rayon = { version = "1", optional = true }
 mirage-relation = { path = "../relation" }
 mirage-encoding = { path = "../encoding", optional = true }
 num-bigint = { version = "0.4", default-features = false }
@@ -58,5 +60,10 @@ parallel = [
     "ark-groth16/parallel",
     "ark-ff/parallel",
     "ark-ec/parallel",
+    "ark-poly/parallel",
     "ark-std/parallel",
+    "dep:rayon",
 ]
+
+[dev-dependencies]
+ark-r1cs-std.workspace = true
