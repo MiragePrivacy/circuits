@@ -6,6 +6,7 @@ members = [
     "crates/relation",
     "crates/prover",
     "crates/fixtures",
+    "crates/sgx-bench",
 ]
 exclude = ["bench-arkworks", "experiments/keccacheck-arkworks"]
 

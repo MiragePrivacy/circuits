@@ -80,6 +80,16 @@ pub(crate) fn profile<F: PrimeField>(cs: &ConstraintSystemRef<F>, stage: &str, l
     let now = cs.num_constraints();
     eprintln!("{stage:>24}: {:>10}", now - *last);
     *last = now;
+    STAGE_MARKS.lock().unwrap().push((stage.to_string(), now));
+}
+
+static STAGE_MARKS: std::sync::Mutex<Vec<(String, usize)>> = std::sync::Mutex::new(Vec::new());
+
+/// The `(stage, constraints so far)` marks recorded by the last profiled
+/// synthesis, each stage ending at its mark. Empty unless `RELATION_PROFILE`
+/// is set.
+pub fn take_stage_marks() -> Vec<(String, usize)> {
+    std::mem::take(&mut STAGE_MARKS.lock().unwrap())
 }
 
 /// Compiled bounds for this build.
