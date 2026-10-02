@@ -21,6 +21,8 @@ use ark_std::rand::SeedableRng;
 
 use mirage_relation::{Bounds, KeccacheckReceiptCircuit, ReceiptCircuit, Witness};
 
+pub mod streaming;
+
 /// A proving and verifying key pair for one circuit version.
 pub struct Keys {
     pub pk: ProvingKey<Bn254>,
@@ -107,7 +109,8 @@ pub fn prove_keccacheck<R: ark_std::rand::RngCore + ark_std::rand::CryptoRng>(
 ) -> Result<Settlement, SettlementError> {
     check_bounds(bounds, witness)?;
     let (hi, lo) = mirage_relation::public_signals(witness);
-    let proof = Groth16::<Bn254>::prove(
+    // Byte-identical to `Groth16::prove`, without building the matrices.
+    let proof = streaming::prove(
         &keys.pk,
         KeccacheckReceiptCircuit::prove(bounds, witness.clone()),
         rng,
@@ -478,7 +481,8 @@ pub mod native {
     ) -> Result<Settlement, SettlementError> {
         check_bounds(bounds, witness)?;
         let (hi, lo) = mirage_relation::native::public_signals(witness);
-        let proof = Groth16::<Bn254>::prove(
+        // Byte-identical to `Groth16::prove`, without building the matrices.
+        let proof = super::streaming::prove(
             &keys.pk,
             KeccacheckNativeCircuit::prove(bounds, witness.clone()),
             rng,

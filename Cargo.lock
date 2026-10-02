@@ -1945,6 +1945,8 @@ dependencies = [
  "ark-ec 0.6.0",
  "ark-ff 0.6.0",
  "ark-groth16",
+ "ark-poly 0.6.0",
+ "ark-r1cs-std 0.6.0",
  "ark-relations 0.6.0",
  "ark-serialize 0.6.0",
  "ark-snark",
@@ -1953,6 +1955,7 @@ dependencies = [
  "mirage-encoding",
  "mirage-relation",
  "num-bigint",
+ "rayon",
  "taceo-groth16-sol",
 ]
 
@@ -1971,6 +1974,24 @@ dependencies = [
  "mirage-keccacheck-arkworks",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "mirage-sgx-bench"
+version = "0.1.0"
+dependencies = [
+ "ark-bn254 0.6.0",
+ "ark-ec 0.6.0",
+ "ark-ff 0.6.0",
+ "ark-groth16",
+ "ark-poly 0.6.0",
+ "ark-relations 0.6.0",
+ "ark-snark",
+ "ark-std 0.6.0",
+ "mirage-keccacheck-arkworks",
+ "mirage-prover",
+ "mirage-relation",
+ "rayon",
 ]
 
 [[package]]
