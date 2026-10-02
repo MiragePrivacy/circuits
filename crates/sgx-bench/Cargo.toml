@@ -1,0 +1,23 @@
+[package]
+name = "mirage-sgx-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "sgx-bench"
+path = "src/main.rs"
+
+[dependencies]
+mirage-relation = { path = "../relation" }
+mirage-prover = { path = "../prover", default-features = false, features = ["parallel"] }
+mirage-keccacheck-arkworks = { path = "../../experiments/keccacheck-arkworks" }
+ark-groth16 = { workspace = true, features = ["parallel"] }
+ark-bn254.workspace = true
+ark-ec = { workspace = true, features = ["parallel"] }
+ark-ff = { workspace = true, features = ["parallel"] }
+ark-poly = { version = "0.6", default-features = false, features = ["parallel"] }
+ark-relations.workspace = true
+ark-snark = { version = "0.6", default-features = false }
+ark-std = { workspace = true, features = ["parallel"] }
+rayon = "1"
