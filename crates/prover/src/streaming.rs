@@ -44,13 +44,29 @@ pub enum MsmStrategy {
     Chunked(usize),
 }
 
-/// Proves `circuit` against `pk` with the default strategy.
+/// Bases per MSM chunk inside an SGX enclave.
+///
+/// Measured for the native circuit on a 378 MiB-EPC host (sgx1, 16 threads):
+/// the proof took 132.7s with whole-key MSMs, and 104.0s, 90.8s, 84.5s, 84.2s
+/// and 93.2s with chunks of 16Ki, 64Ki, 256Ki, 512Ki and 1Mi bases. 256Ki sits
+/// on the plateau. On a host, where nothing is paged, chunking only adds
+/// per-chunk overhead.
+pub const SGX_MSM_CHUNK: usize = 1 << 18;
+
+/// [`MsmStrategy::Chunked`] inside an enclave, [`MsmStrategy::Whole`] elsewhere.
+pub const DEFAULT_STRATEGY: MsmStrategy = if cfg!(target_env = "sgx") {
+    MsmStrategy::Chunked(SGX_MSM_CHUNK)
+} else {
+    MsmStrategy::Whole
+};
+
+/// Proves `circuit` against `pk` with [`DEFAULT_STRATEGY`].
 pub fn prove<C: ConstraintSynthesizer<Fr>, R: Rng>(
     pk: &ProvingKey<Bn254>,
     circuit: C,
     rng: &mut R,
 ) -> Result<Proof<Bn254>, SynthesisError> {
-    prove_with(pk, circuit, rng, MsmStrategy::Whole)
+    prove_with(pk, circuit, rng, DEFAULT_STRATEGY)
 }
 
 /// Proves `circuit` against `pk`, walking the key with `strategy`.
