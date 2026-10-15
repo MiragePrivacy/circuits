@@ -40,6 +40,36 @@ fn main() {
         witness.statement.bond_deadline = witness.statement.bond_start_block + 75;
     }
 
+    let batch_row = std::env::args().any(|arg| arg == "--batch-row");
+    if batch_row {
+        assert!(keccachecheck, "batch fixtures require Keccacheck");
+        witness.statement.bond_start_block = 20_999_990;
+        witness.statement.bond_deadline = witness.statement.bond_start_block + 75;
+        witness.statement.witness_block_number = 20_999_999;
+        witness.header = fixture::header_with_roots(
+            &[0x44; 32],
+            &witness.root.clone().try_into().expect("receipt root"),
+            witness.statement.witness_block_number,
+        );
+        witness.statement.witness_block_hash = fixture::keccak(&witness.header);
+        witness.intent.row_index = 1;
+        witness.statement.row_index = 1;
+        let i = &witness.intent;
+        witness.statement.intent_commitment = mirage_encoding::commitment::Intent {
+            instance_domain: i.instance_domain,
+            chain_id: i.chain_id,
+            escrow: i.escrow,
+            request_id: i.request_id,
+            row_index: i.row_index,
+            asset_kind: mirage_encoding::AssetKind::Erc20,
+            settlement_token: i.settlement_token,
+            recipient: i.recipient,
+            settlement_amount: i.settlement_amount,
+            salt: i.salt,
+        }
+        .commitment();
+    }
+
     // Setup. This is `circuit_specific_setup`, a toy: spec 18.2 requires a
     // multiparty Phase 2 producing the same artifact soundly. The verifier
     // rendered below is structurally identical either way, so the size and gas
@@ -75,10 +105,26 @@ fn main() {
     let [hi, lo] = settlement.signals;
 
     let json = proof_json(&settlement.proof, hi, lo, &witness);
-    std::fs::write(out.join("proof.json"), &json).expect("write proof.json");
+    std::fs::write(
+        out.join(if batch_row {
+            "batch_row_proof.json"
+        } else {
+            "proof.json"
+        }),
+        &json,
+    )
+    .expect("write proof.json");
 
     let calldata = calldata(&settlement.proof, hi, lo);
-    std::fs::write(out.join("calldata.txt"), &calldata).expect("write calldata.txt");
+    std::fs::write(
+        out.join(if batch_row {
+            "batch_row_calldata.txt"
+        } else {
+            "calldata.txt"
+        }),
+        &calldata,
+    )
+    .expect("write calldata.txt");
 
     eprintln!("\n{}", calldata);
     eprintln!("Next: compile Verifier.sol with solc and call verifyProof with the above.");

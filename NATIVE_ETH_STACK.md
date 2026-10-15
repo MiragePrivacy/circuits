@@ -290,3 +290,19 @@ measurement, not SGX hardware latency or proving-only peak memory.
 Existing setup, transcript-review, and native-versus-ERC-20 timing/privacy
 release gates still apply. See `crates/relation/src/native.rs` and
 `experiments/keccacheck-arkworks/RESULTS.md`.
+
+## Per-row batch proof fixture
+
+Batch collection reuses the current circuits and keys. Generate the nonzero-row
+ERC-20 fixture with:
+
+```sh
+nix develop --command env RAYON_NUM_THREADS=16 cargo run --release -p mirage-prover --bin export-verifier -- --keccachecheck --batch-row
+```
+
+`contracts/batch_row_proof.json` binds row 1 and a 75-block lease matching the
+native fixture's lease. The ERC-20 witness block immediately precedes the native
+fixture block, so both proofs can be checked in one mixed-asset collection.
+The exporter self-verifies the proof. The escrow integration exercises both
+verifiers, row binding, partial collection, and atomic mixed collection. This
+adds no nullifier or aggregation circuit; clients still reject identical rows.
