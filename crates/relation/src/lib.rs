@@ -971,7 +971,7 @@ mod tests {
         );
         assert_eq!(result.recorded, 38);
         assert_eq!(result.padded, 64);
-        assert_eq!(cs.num_constraints(), 1_889_993);
+        assert_eq!(cs.num_constraints(), 1_860_578);
         assert!(
             cs.is_satisfied().unwrap(),
             "unsatisfied: {:?}",
@@ -1062,6 +1062,6 @@ mod tests {
         KeccacheckReceiptCircuit::setup(Bounds::default())
             .generate_constraints(cs.clone())
             .unwrap();
-        assert_eq!(cs.num_constraints(), 1_889_993);
+        assert_eq!(cs.num_constraints(), 1_860_578);
     }
 }

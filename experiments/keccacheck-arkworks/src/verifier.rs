@@ -5,7 +5,7 @@
 use crate::poseidon2::SpongeVar;
 use ark_bn254::Fr;
 use ark_bn254_05::Fr as Fr05;
-use ark_ff::{MontFp, One, Zero};
+use ark_ff::{AdditiveGroup, MontFp, One, Zero};
 use ark_r1cs_std::{alloc::AllocVar, boolean::Boolean, eq::EqGadget, fields::fp::FpVar};
 use ark_relations::gr1cs::{ConstraintSystemRef, SynthesisError};
 use std::str::FromStr;
@@ -392,24 +392,59 @@ fn verify_round(
     Ok((vrs_a, iota))
 }
 
-pub fn derive_r_native(output: &[u64], log_instances: usize) -> Vec<Fr05> {
-    if log_instances == 0 {
-        return Vec::new();
-    }
+/// Smallest batch accepted by the verifier.
+///
+/// A singleton batch derives no output challenge, so the transcript would
+/// absorb nothing about the claimed states before `beta` is squeezed.
+pub const MIN_INSTANCES: usize = 2;
+
+/// Words packed into each absorbed field element; 192 bits fit injectively.
+const WORDS_PER_ELEMENT: usize = 3;
+
+const STATEMENT_TAG: u128 = u128::from_le_bytes(*b"mirage/kcck/stmt");
+
+/// Derives the output challenge from the full claimed statement.
+///
+/// Both slices are lane-major (`[lane][instance]`). Absorbing the inputs as
+/// well as the outputs binds every later challenge to the whole statement.
+pub fn derive_r_native(input: &[u64], output: &[u64], log_instances: usize) -> Vec<Fr05> {
+    assert!(log_instances > 0, "Keccacheck needs at least two instances");
+    let word = Fr05::from(1u128 << 64);
     let mut sponge = gkr::transcript::Sponge::new();
-    for value in output {
-        sponge.absorb(Fr05::from(*value));
+    sponge.absorb(Fr05::from(STATEMENT_TAG));
+    sponge.absorb(Fr05::from(1u64 << log_instances));
+    for chunk in input
+        .chunks(WORDS_PER_ELEMENT)
+        .chain(output.chunks(WORDS_PER_ELEMENT))
+    {
+        let packed = chunk.iter().rev().fold(Fr05::from(0u64), |acc, value| {
+            acc * word + Fr05::from(*value)
+        });
+        sponge.absorb(packed);
     }
     (0..log_instances).map(|_| sponge.squeeze()).collect()
 }
 
-fn derive_r_var(output: &[FpVar<Fr>], log_instances: usize) -> Vec<FpVar<Fr>> {
-    if log_instances == 0 {
-        return Vec::new();
-    }
+fn derive_r_var(
+    input_bits: &[FpVar<Fr>],
+    output_bits: &[FpVar<Fr>],
+    log_instances: usize,
+) -> Vec<FpVar<Fr>> {
+    assert!(log_instances > 0, "Keccacheck needs at least two instances");
     let mut sponge = SpongeVar::new();
-    for value in output {
-        sponge.absorb(value);
+    sponge.absorb(&FpVar::Constant(Fr::from(STATEMENT_TAG)));
+    sponge.absorb(&FpVar::Constant(Fr::from(1u64 << log_instances)));
+    for chunk in input_bits
+        .chunks(64 * WORDS_PER_ELEMENT)
+        .chain(output_bits.chunks(64 * WORDS_PER_ELEMENT))
+    {
+        let mut power = Fr::one();
+        let mut packed = FpVar::Constant(Fr::zero());
+        for bit in chunk {
+            packed += bit * power;
+            power.double_in_place();
+        }
+        sponge.absorb(&packed);
     }
     (0..log_instances).map(|_| sponge.squeeze()).collect()
 }
@@ -443,7 +478,7 @@ pub fn verify_witness_profile(
 ) -> Result<VerificationProfile, SynthesisError> {
     let start = cs.num_constraints();
     let instances = witness.input.len() / 25;
-    assert!(instances.is_power_of_two());
+    assert!(instances.is_power_of_two() && instances >= MIN_INSTANCES);
     assert_eq!(witness.output.len(), 25 * instances);
 
     let proof = witness
@@ -493,7 +528,7 @@ pub fn verify_boolean_batch(
     assert_eq!(input_bits.len(), output_bits.len());
     assert_eq!(input_bits.len() % (25 * 64), 0);
     let instances = input_bits.len() / (25 * 64);
-    assert!(instances.is_power_of_two());
+    assert!(instances.is_power_of_two() && instances >= MIN_INSTANCES);
     let start = cs.num_constraints();
     let proof = proof_values
         .iter()
@@ -544,7 +579,7 @@ fn verify_allocated(
         })
         .collect::<Vec<_>>();
 
-    let r = derive_r_var(&output, log_instances);
+    let r = derive_r_var(&input_bits, &output_bits, log_instances);
     let after_output_binding = cs.num_constraints();
     let mut transcript = TranscriptVar::new(proof);
     for challenge in &r {
@@ -627,30 +662,35 @@ fn verify_allocated(
 }
 
 pub fn make_witness(instances: usize) -> Witness {
-    assert!(instances.is_power_of_two());
+    assert!(instances.is_power_of_two() && instances >= MIN_INSTANCES);
     let data = (0..instances * 25).map(|i| i as u64).collect::<Vec<_>>();
     make_witness_from_data(&data)
 }
 
 pub fn proof_elements(instances: usize) -> usize {
-    assert!(instances.is_power_of_two());
+    assert!(instances.is_power_of_two() && instances >= MIN_INSTANCES);
     6_255 + 554 * instances.ilog2() as usize
 }
 
 pub fn make_witness_from_data(data: &[u64]) -> Witness {
     assert_eq!(data.len() % 25, 0);
     let instances = data.len() / 25;
-    assert!(instances.is_power_of_two());
+    assert!(instances.is_power_of_two() && instances >= MIN_INSTANCES);
+    let mut input = vec![0u64; instances * 25];
     let mut output = vec![0u64; instances * 25];
     for instance in 0..instances {
         let mut state: [u64; 25] = core::array::from_fn(|lane| data[instance * 25 + lane]);
+        for lane in 0..25 {
+            input[lane * instances + instance] = state[lane];
+        }
         keccak::f1600(&mut state);
         for lane in 0..25 {
             output[lane * instances + instance] = state[lane];
         }
     }
-    let r = derive_r_native(&output, instances.ilog2() as usize);
-    let (proof_05, input, proved_output) = gkr::keccacheck_og::prover::prove(&data, r);
+    let r = derive_r_native(&input, &output, instances.ilog2() as usize);
+    let (proof_05, proved_input, proved_output) = gkr::keccacheck_og::prover::prove(&data, r);
+    assert_eq!(proved_input, input);
     assert_eq!(proved_output, output);
     let proof = proof_05
         .iter()
@@ -671,9 +711,15 @@ mod tests {
     use super::*;
     use ark_relations::gr1cs::ConstraintSystem;
 
+    fn satisfied(witness: &Witness) -> bool {
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        verify_witness(cs.clone(), witness).unwrap();
+        cs.is_satisfied().unwrap()
+    }
+
     #[test]
-    fn one_permutation_proof_satisfies() {
-        let witness = make_witness(1);
+    fn minimum_batch_proof_satisfies() {
+        let witness = make_witness(MIN_INSTANCES);
         let cs = ConstraintSystem::<Fr>::new_ref();
         verify_witness(cs.clone(), &witness).unwrap();
         assert!(
@@ -685,26 +731,77 @@ mod tests {
 
     #[test]
     fn altered_output_is_rejected() {
-        let mut witness = make_witness(1);
+        let mut witness = make_witness(MIN_INSTANCES);
         witness.output[0] ^= 1;
-        let cs = ConstraintSystem::<Fr>::new_ref();
-        verify_witness(cs.clone(), &witness).unwrap();
-        assert!(!cs.is_satisfied().unwrap());
+        assert!(!satisfied(&witness));
+    }
+
+    #[test]
+    fn altered_input_is_rejected() {
+        let mut witness = make_witness(MIN_INSTANCES);
+        witness.input[0] ^= 1;
+        assert!(!satisfied(&witness));
     }
 
     #[test]
     fn altered_proof_is_rejected() {
-        let mut witness = make_witness(1);
+        let mut witness = make_witness(MIN_INSTANCES);
         witness.proof[0] += Fr::one();
+        assert!(!satisfied(&witness));
+    }
+
+    #[test]
+    #[should_panic(expected = "instances >= MIN_INSTANCES")]
+    fn singleton_batch_is_refused() {
         let cs = ConstraintSystem::<Fr>::new_ref();
-        verify_witness(cs.clone(), &witness).unwrap();
-        assert!(!cs.is_satisfied().unwrap());
+        let bits = vec![Boolean::FALSE; 25 * 64];
+        let _ = verify_boolean_batch(cs, &[], &bits, &bits);
+    }
+
+    #[test]
+    fn statement_challenge_binds_every_input_and_output_word() {
+        let witness = make_witness(MIN_INSTANCES);
+        let log_instances = MIN_INSTANCES.ilog2() as usize;
+        let r = derive_r_native(&witness.input, &witness.output, log_instances);
+        for word in 0..witness.input.len() {
+            let mut input = witness.input.clone();
+            input[word] ^= 1 << 63;
+            assert_ne!(derive_r_native(&input, &witness.output, log_instances), r);
+            let mut output = witness.output.clone();
+            output[word] ^= 1 << 63;
+            assert_ne!(derive_r_native(&witness.input, &output, log_instances), r);
+        }
+    }
+
+    /// A short kernel vector of the 25 `beta` constants a fresh transcript
+    /// yields when nothing is absorbed. It forged singleton outputs before
+    /// singleton batches were refused and the statement was absorbed.
+    #[test]
+    fn beta_kernel_shift_is_rejected() {
+        const DELTA: [i64; 25] = [
+            158, 268, -238, 486, 15, 78, -235, 18, 178, 774, -62, -39, 487, -49, 214, 552, 353,
+            -26, -460, 151, -171, -44, 174, 173, -145,
+        ];
+        let mut data = vec![0u64; 25 * MIN_INSTANCES];
+        for lane in 0..25 {
+            data[lane] = 7 + lane as u64;
+        }
+        let mut witness = make_witness_from_data(&data);
+        assert!(satisfied(&witness));
+        for (lane, delta) in DELTA.iter().enumerate() {
+            let word = &mut witness.output[lane * MIN_INSTANCES];
+            *word = word.checked_add_signed(*delta).unwrap();
+        }
+        assert!(!satisfied(&witness));
     }
 
     #[test]
     fn proof_length_formula_matches_native_prover() {
-        for instances in [1, 2, 4, 8, 16, 32, 64, 128] {
-            assert_eq!(make_witness(instances).proof.len(), proof_elements(instances));
+        for instances in [2, 4, 8, 16, 32, 64, 128] {
+            assert_eq!(
+                make_witness(instances).proof.len(),
+                proof_elements(instances)
+            );
         }
     }
 }

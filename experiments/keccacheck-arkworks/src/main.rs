@@ -1,6 +1,6 @@
 use ark_bn254::Fr;
 use ark_relations::gr1cs::ConstraintSystem;
-use mirage_keccacheck_arkworks::verifier::{make_witness, verify_witness_profile};
+use mirage_keccacheck_arkworks::verifier::{MIN_INSTANCES, make_witness, verify_witness_profile};
 use std::{env, process::ExitCode, time::Instant};
 
 const DIRECT_CONSTRAINTS_PER_PERMUTATION: usize = 155_200;
@@ -10,8 +10,10 @@ fn usage() {
 }
 
 fn compare(instances: usize) -> Result<(), String> {
-    if !instances.is_power_of_two() {
-        return Err(format!("instance count {instances} is not a power of two"));
+    if !instances.is_power_of_two() || instances < MIN_INSTANCES {
+        return Err(format!(
+            "instance count {instances} is not a power of two of at least {MIN_INSTANCES}"
+        ));
     }
 
     let started = Instant::now();

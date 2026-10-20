@@ -1,7 +1,8 @@
 //! Deferred Keccak-f backend for integration with Mirage's sponge gadgets.
 
 use crate::verifier::{
-    VerificationProfile, make_witness_from_data, proof_elements, verify_boolean_batch,
+    MIN_INSTANCES, VerificationProfile, make_witness_from_data, proof_elements,
+    verify_boolean_batch,
 };
 use ark_bn254::Fr;
 use ark_ff::Zero;
@@ -35,7 +36,7 @@ impl KeccacheckBatch {
     pub fn finish(mut self) -> Result<BatchResult, SynthesisError> {
         let recorded = self.inputs.len();
         assert!(recorded > 0, "cannot prove an empty Keccak batch");
-        let padded = recorded.next_power_of_two();
+        let padded = recorded.next_power_of_two().max(MIN_INSTANCES);
         while self.inputs.len() < padded {
             let input_words = [0u64; 25];
             let mut output_words = input_words;
@@ -145,6 +146,24 @@ mod tests {
         })
     }
 
+    /// Flips allocated bits after synthesis.
+    ///
+    /// Symbolic linear combinations cache their values when created. The system
+    /// is finalized (inlining every combination into witness terms) and the
+    /// cache dropped, so each constraint re-evaluates from the edited witness.
+    fn flip(cs: &ConstraintSystemRef<Fr>, bits: &[Boolean<Fr>]) {
+        cs.finalize();
+        let mut inner = cs.borrow_mut().unwrap();
+        for bit in bits {
+            let Boolean::Var(bit) = bit else {
+                panic!("expected an allocated bit");
+            };
+            let value = &mut inner.assignments.witness_assignment[bit.variable().index().unwrap()];
+            *value = Fr::from(1u64) - *value;
+        }
+        inner.assignments.lc_assignment.clear();
+    }
+
     #[test]
     fn caller_owned_states_are_verified_and_padding_is_constant() {
         let cs = ConstraintSystem::new_ref();
@@ -158,33 +177,22 @@ mod tests {
         assert!(cs.is_satisfied().unwrap());
     }
 
-    /// A one-permutation batch is a distinct code path, and `padded` is a power
-    /// of two, so any caller doing a single permutation reaches it.
-    ///
-    /// With `log_instances == 0` the output challenge vector is empty, the
-    /// first sumcheck runs zero rounds, and the output claim reduces to a
-    /// linear combination of the claimed output words. That combination is
-    /// still transcript-derived and still feeds the round reduction, so it must
-    /// verify a genuine permutation and reject a forged output.
+    /// A singleton GKR batch derives no output challenge, so one recorded
+    /// permutation is padded up to `MIN_INSTANCES`.
     #[test]
-    fn a_single_permutation_batch_verifies() {
+    fn a_single_permutation_is_padded_and_verifies() {
         let cs = ConstraintSystem::new_ref();
         let mut batch = KeccacheckBatch::new(cs.clone());
         let _ = batch.permute(witness_state(cs.clone(), 7)).unwrap();
         let result = batch.finish().unwrap();
         assert_eq!(result.recorded, 1);
-        assert_eq!(result.padded, 1);
+        assert_eq!(result.padded, MIN_INSTANCES);
         assert!(
             cs.is_satisfied().unwrap(),
-            "genuine singleton batch rejected"
+            "genuine single-permutation batch rejected"
         );
     }
 
-    /// The same path must not accept an output that is not `keccak-f(input)`.
-    ///
-    /// Flipping one output bit after the batch is built leaves every constraint
-    /// in place and changes only the assignment, which is what a malicious
-    /// prover controls.
     #[test]
     fn a_single_permutation_batch_rejects_a_forged_output() {
         let cs = ConstraintSystem::new_ref();
@@ -192,23 +200,25 @@ mod tests {
         let output = batch.permute(witness_state(cs.clone(), 7)).unwrap();
         let _ = batch.finish().unwrap();
         assert!(cs.is_satisfied().unwrap());
-
-        let Boolean::Var(bit) = output[0][0].clone() else {
-            panic!("output bit is not an allocated witness");
-        };
-        let index = bit.variable().index().unwrap();
-        let flipped = {
-            let assignment = &cs.borrow().unwrap().assignments.witness_assignment[index];
-            if assignment.is_zero() {
-                Fr::from(1u64)
-            } else {
-                Fr::zero()
-            }
-        };
-        cs.borrow_mut().unwrap().assignments.witness_assignment[index] = flipped;
+        flip(&cs, &output[0][..1]);
         assert!(
             !cs.is_satisfied().unwrap(),
-            "singleton batch accepted an output bit that is not keccak-f(input)"
+            "batch accepted an output bit that is not keccak-f(input)"
+        );
+    }
+
+    #[test]
+    fn a_single_permutation_batch_rejects_a_forged_input() {
+        let cs = ConstraintSystem::new_ref();
+        let mut batch = KeccacheckBatch::new(cs.clone());
+        let input = witness_state(cs.clone(), 7);
+        let _ = batch.permute(input.clone()).unwrap();
+        let _ = batch.finish().unwrap();
+        assert!(cs.is_satisfied().unwrap());
+        flip(&cs, &input[3][..1]);
+        assert!(
+            !cs.is_satisfied().unwrap(),
+            "batch accepted an input bit that does not map to its output"
         );
     }
 }
