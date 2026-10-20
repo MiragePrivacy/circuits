@@ -3,8 +3,23 @@
 
 use ark_bn254::Fr;
 use ark_r1cs_std::{alloc::AllocVar, fields::fp::FpVar, GR1CSVar};
-use ark_relations::gr1cs::ConstraintSystem;
+use ark_relations::gr1cs::{ConstraintSystem, ConstraintSystemRef};
 use mirage_gadgets::bytes::{alloc_bounded, one_hot, select_byte_with};
+
+/// Repoints a witness index after synthesis.
+///
+/// Symbolic linear combinations cache their values when created. The system
+/// is finalized (inlining every combination into witness terms) and the
+/// cache dropped, so each constraint re-evaluates from the edited witness.
+fn repoint(cs: &ConstraintSystemRef<Fr>, idx: &FpVar<Fr>, value: u64) {
+    let FpVar::Var(allocated) = idx else {
+        unreachable!()
+    };
+    cs.finalize();
+    let mut inner = cs.borrow_mut().unwrap();
+    inner.assignments.witness_assignment[allocated.variable.index().unwrap()] = Fr::from(value);
+    inner.assignments.lc_assignment.clear();
+}
 
 #[test]
 fn audit_reproduces_zero_selector_for_in_range_index() {
@@ -19,11 +34,7 @@ fn audit_reproduces_zero_selector_for_in_range_index() {
 
     // A malicious prover controls assignments, not just the honest generator.
     // Change only the index assignment; all other assignments stay unchanged.
-    let FpVar::Var(allocated) = idx else {
-        unreachable!()
-    };
-    cs.borrow_mut().unwrap().assignments.witness_assignment[allocated.variable.index().unwrap()] =
-        Fr::from(1u64);
+    repoint(&cs, &idx, 1);
     assert!(cs.is_satisfied().unwrap(), "attack no longer reproduces");
     assert_ne!(read.value().unwrap(), 22, "buf[1] is 22, not zero");
 }
@@ -48,11 +59,7 @@ fn in_range_selector_rejects_a_suppressed_read() {
     assert!(!cs.is_satisfied().unwrap());
 
     // Repoint the index at an in-range slot, keeping the all-zero selector.
-    let FpVar::Var(allocated) = idx else {
-        unreachable!()
-    };
-    cs.borrow_mut().unwrap().assignments.witness_assignment[allocated.variable.index().unwrap()] =
-        Fr::from(1u64);
+    repoint(&cs, &idx, 1);
     assert!(
         !cs.is_satisfied().unwrap(),
         "all-zero selector still accepted for an in-range index"
