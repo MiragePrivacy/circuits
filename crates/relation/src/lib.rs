@@ -29,11 +29,9 @@
 //! therefore satisfies every live row whose intent shares
 //! `(token, recipient, amount)`, and the log's sender is unconstrained.
 //!
-//! That is closed by policy, not here: the nomad must never hold two live
-//! requests with identical intents. Settlement soundness depends on that
-//! invariant holding off-chain. See the "Carried by out-of-circuit policy"
-//! section of `experiments/keccacheck-arkworks/RESULTS.md` for the analysis
-//! and the alternatives if it stops being tenable.
+//! Preventing reuse across identical intents requires an off-chain uniqueness
+//! policy. That policy does not establish payer attribution. See FINDINGS.md
+//! for the integration requirements and remaining release gates.
 
 pub mod native;
 

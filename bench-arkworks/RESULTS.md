@@ -1,5 +1,9 @@
 # ark-groth16 BN254 proving benchmark
 
+Historical synthetic measurements from August 2026, retained with
+[raw data](results.jsonl). These do not measure the current settlement circuits
+or matrix-free prover. See [current benchmark status](../BENCHMARKS.md).
+
 Every timing, memory and size figure below is measured on the machine described
 in [Environment](#environment). The only derived numbers are the ~3M constraint
 interpolations, which sit between two measured points and are always marked

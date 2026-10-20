@@ -7,8 +7,8 @@
 //! ```
 //! Both use identical bounds and witnesses. Proving includes GKR witness
 //! generation (Keccacheck) and the library's Groth16 self-verification. Peak
-//! RSS covers constraint counting, setup, and all proofs; it is not a
-//! proving-only memory measurement. Seeded randomness is for benchmarks only.
+//! RSS is reported separately for counting/setup and proving, with the key
+//! resident during proving. Seeded randomness is for benchmarks only.
 
 use std::time::Instant;
 

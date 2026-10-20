@@ -1,9 +1,7 @@
 //! Generates a real Groth16 proof and reports what it actually cost.
 //!
-//! Every memory and timing figure in FINDINGS up to this point is *derived*:
-//! RAM extrapolates 2.8 GB per million constraints from the arkworks benchmark,
-//! and time extrapolates 21s per 3M measured on a multiplication chain, which
-//! is the prover's best case. This binary replaces both with measurements.
+//! Uses the standard Groth16 prover for both circuits. For the matrix-free
+//! production path, use sgx-bench with an explicit prover plan.
 //!
 //! Run:
 //! ```sh

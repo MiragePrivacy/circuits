@@ -1,10 +1,9 @@
-# Arkworks Keccacheck exploration results
+# Historical Keccacheck measurements
 
-Reference: Reilabs Keccacheck commit
-[`15f00e3da5622f1c7155b02d1f9c00bd2416c282`](https://github.com/reilabs/keccacheck/tree/15f00e3da5622f1c7155b02d1f9c00bd2416c282),
-with WHIR disabled. Measurements are from this branch's arkworks 0.6 R1CS port.
-They use native proof generation followed by constraint synthesis and
-`is_satisfied`; no Groth16 setup was run during the optimization loop.
+These measurements describe the initial arkworks 0.6 port of Reilabs commit
+`15f00e3da5622f1c7155b02d1f9c00bd2416c282`, with WHIR disabled. They predate
+field-level parsing and the matrix-free prover. For the current relation and
+measurement status, see [BENCHMARKS.md](../../BENCHMARKS.md).
 
 ## Measured comparison
 
@@ -44,183 +43,27 @@ operations with no custom compiler optimization pass, so closing that gap is a
 separate optimization opportunity; the present numbers are the safe comparison
 for Mirage's backend.
 
-## Measured universal-circuit integration
+## Earlier relation measurements
 
-The universal depth-seven relation is 8,095,727 constraints. Its bounded
-Keccak calls compile 38 Keccak-f permutations:
+| Revision / stage | Circuit | Constraints | Proof time | Memory scope |
+|---|---|---:|---:|---|
+| `8b60d00`, initial integration | ERC-20 | 4,034,927 | 24.9 s, one sample | 12.6 GiB total peak RSS |
+| September 16 batching port | Native direct | 17,635,451 | 44.871 s median, 3 samples | 27.272 GiB total peak RSS |
+| September 16 batching port | Native Keccacheck | 11,620,286 | 45.439 s median, 3 samples | 24.831 GiB total peak RSS |
+| September 22 structural optimization | Native Keccacheck | 7,327,757 | 42.525 s median, 3 samples | 23.298 GiB total peak RSS |
 
-- commitment: 2;
-- statement: 3;
-- header: 6;
-- six MPT ancestors: 23;
-- constructed leaf: 4.
+These ran on an i9-14900HX with 16 Rayon threads. The native runs included
+self-verification. Total peak RSS includes counting/setup/proving and cannot
+be compared directly with proving-only RSS or allocator heap measurements.
+No row establishes p95 or SGX performance.
 
-The integrated backend allocates each real output state as Boolean witnesses,
-preserves the existing sponge chaining and variable-length state selection,
-and pads the batch with 26 constant zero-input permutations. The complete
-genuine relation synthesized and satisfied with this measured breakdown:
+Raw native logs:
 
-```text
-non-GKR relation constraints: 2,331,459
-64-way GKR verifier:          1,704,924
-complete relation:            4,036,383
-```
+- [September 16 direct](benchmarks/native-direct.log)
+- [September 16 Keccacheck](benchmarks/native-keccacheck.log)
+- [September 22 before](benchmarks/native-structural-before.log)
+- [September 22 after](benchmarks/native-structural-after.log)
 
-This is 4,060,800 fewer constraints than the 8,097,183 direct-Keccak relation,
-a measured 50.2% reduction. The integrated verifier is smaller than the fully
-witnessed standalone 64-way case because the 26 padding states are constants.
-
-Both figures include the 1,456 constraints added by the one-hot in-range
-assertions and buffer bounds in `b5192b4`. The timings below predate that
-commit and were not re-measured; the delta is 0.04% of the relation.
-
-## Correctness checks
-
-- Poseidon2 permutation values are differential-tested against the pinned
-  native implementation.
-- Direct arkworks Keccak is differential-tested against native `keccak::f1600`
-  and locks the 155,200-constraint control cost.
-- A native Keccacheck proof satisfies the full 24-round arkworks verifier.
-- Mutating either a proof element or an output word makes the R1CS
-  unsatisfied.
-- The complete genuine Mirage relation satisfies with 38 recorded and 64
-  padded permutations.
-- The batched relation rejects an incorrect authenticated header hash, and
-  rejects every mutation the direct relation rejects: substituted recipient and
-  amount, a commitment from another context, a native-asset opening, a block
-  number outside the statement, both lease-window boundaries, and a tampered
-  receipt byte.
-- A one-permutation batch, whose zero-round sumcheck is a distinct code path,
-  verifies a genuine permutation and rejects a flipped output bit.
-- The deepest fixture in the 100-case mainnet dataset satisfies the batched
-  circuit as a fast real-data integration gate.
-- All tests use the reference's corrected late-round Keccak constants.
-
-## Feasibility and remaining work
-
-The integration now has an alternate `KeccacheckReceiptCircuit` and Rust
-`setup_keccacheck`/`prove_keccacheck` APIs. Remaining finalist work is:
-
-1. Run the remaining mainnet-fixture suite through the batched circuit. The
-   mutation suite now runs there (`batched_keccacheck_rejects_every_direct_mutation`).
-2. Obtain cryptographic sign-off on the Poseidon-derived output challenge and
-   the absent transcript domain separation. Reviewed adversarially and no
-   exploitable gap was found; see "Open security items" below for what a
-   reviewer still needs to confirm.
-3. Vendor or migrate the upstream Rust GKR prover to arkworks 0.6, removing the
-   temporary dual-version scalar conversion.
-4. Investigate the arkworks overhead relative to gnark, principally
-   in the round verifier and transcript expression lowering.
-5. Measure a latency distribution and peak proving-only memory on the target
-   enclave after the native GKR dependency is made enclave-compatible.
-
-The GKR proof occupies about 307 KiB at 64 permutations, but it is private
-Groth16 witness data, not calldata and not an additional on-chain proof.
-
-## End-to-end Groth16 measurement
-
-Commit `8b60d00` was measured in release mode on an Intel Core i9-14900HX with
-16 Rayon threads. This is one complete local sample, not a latency
-distribution or an enclave measurement.
-
-| Stage | Measurement |
-|---|---:|
-| Constraints | 4,034,927 (now 4,036,383) |
-| Satisfying diagnostic synthesis | 35.7 s |
-| Circuit-specific Groth16 setup | 28.8 s |
-| Groth16 proving | 24.9 s |
-| Groth16 verification | 1.52 ms |
-| Peak process RSS across synthesis, setup, and proving | 12.6 GiB |
-| Proving key | 1.44 GiB uncompressed / 0.72 GiB compressed |
-| Compressed proof | 128 bytes |
-
-The 24.9-second proving measurement includes native GKR witness generation,
-outer-circuit synthesis, witness mapping, and the Groth16 multiexponentiations.
-The generated proof verified against its two public statement-hash limbs and
-was rejected after mutating one limb. The 28.8-second deterministic setup is a
-measurement stand-in, not a production ceremony.
-
-## Open security items
-
-An adversarial review of the integrated relation ran five independent attack
-surfaces: the GKR verifier, MPT inclusion and the constructed leaf, the receipt
-and ERC-20 log relation, the header parse and variable-length sponge, and the
-commitment, statement hash and protocol replay surface. One in-circuit forgery
-was found and fixed in `b5192b4`. The items below remain open and are not
-fixable in this crate.
-
-### Needs cryptographic sign-off
-
-The output challenge `r` is derived in-circuit with Poseidon2 over the claimed
-output words, replacing gnark's Groth16 commitment API. Transcript ordering was
-checked and is correct: outputs are absorbed before `r` is squeezed, `r` is
-absorbed before `beta`, and every proof value is absorbed before the challenge
-that tests it. The residual difference from upstream is that a
-commitment-derived challenge also binds the witness commitment, whereas this
-binds only the output words.
-
-`derive_r_var` and the main transcript are separate sponge instances started
-from the same `INITIAL_STATE`, with no domain separation tag. Their absorb
-sequences differ, so no collision is reachable, and upstream has no tag either.
-Adding one would fork the transcript from the pinned native prover at
-`15f00e3`, so it is a protocol change rather than a local fix.
-
-The singleton batch is a distinct code path: with one permutation
-`log_instances` is zero, the first sumcheck runs zero rounds, and the output
-claim reduces to a transcript-derived linear combination of the output words.
-`batch::tests` now covers it in both directions.
-
-### Carried by out-of-circuit policy
-
-Nothing in the statement or the commitment binds the transaction hash,
-`transactionIndex`, or log position. The MPT key is a free witness. The
-relation therefore proves that a matching Transfer exists somewhere in the
-block, not that a particular transaction produced it.
-
-Consequently one on-chain Transfer satisfies every live row whose intent has
-the same token, recipient and amount. Two requests for the same payment can be
-settled by a single transfer. The log's sender is also unconstrained, so an
-executor can claim a coincidental third-party transfer that lands inside its
-lease.
-
-This is closed by policy rather than by the circuit. **The nomad must never
-hold two live requests whose intents share `(token, recipient, amount)`**,
-enforced by rejecting or jittering a duplicate at request creation. That keeps
-the constraint count and the privacy properties unchanged, at the cost of
-making settlement soundness depend on an off-chain invariant: a nomad bug that
-admits duplicate live intents silently reintroduces the double-settle, and
-nothing on-chain will catch it. The invariant therefore belongs in the nomad's
-own test suite, not only in its request path.
-
-The alternatives, if that invariant ever becomes untenable: bind
-`transactionIndex` into the statement preimage (a relation version bump, and
-the escrow must then store the settled index per row), or expose a receipt
-nullifier as a third public signal (strongest, enforced on-chain, but adds a
-public input and a linkable per-settlement tag). If `transactionIndex` is ever
-bound, note that the one-hot in-range assertions in `b5192b4` are what make
-that binding meaningful: without them a prover could suppress a key nibble read
-and prove a genuine receipt at a fabricated index.
-
-## Native ETH integration
-
-The native dual-trie relation now batches all 51 permutations into one private
-64-way Keccacheck proof. At unchanged bounds it falls from 17,635,451 to
-11,620,286 constraints. A sequential three-proof host comparison measured
-44.871 s direct versus 45.439 s Keccacheck median proving, with peak process
-RSS falling from 27.272 to 24.831 GiB and the uncompressed key from 7.168 to
-4.378 GiB. This port reduces constraints and memory, but the sample shows no
-proving-time improvement because GKR expression inlining offsets the savings.
-See [native implementation, validation, and full benchmark](../../NATIVE_ETH_STACK.md).
-
-## Native structural optimization follow-up (2026-09-22)
-
-Applied authenticated header-prefix extraction, constructed leaves to both
-tries, structural ancestor bounds, depth seven, and shared transaction RLP
-decoding. Constraints: 11,620,286 → 7,327,757. A fresh sequential three-proof
-comparison measured median verified proving 47.379 → 42.525 s, uncompressed
-key 4.378 → 2.661 GiB, and total peak RSS 24.831 → 23.298 GiB. Setup peak
-RSS rises from 16.818 to 18.770 GiB as the batch grows from 64 to 128.
-
-[Full methodology, audit, and validation](../../NATIVE_ETH_STACK.md).
-[Before profile](benchmarks/native-structural-before.log),
-[after profile](benchmarks/native-structural-after.log).
+The September 22 comparison used `3d78fb8` before and `fc3f905` after; its
+before median was 47.379 s. It is a separate run from September 16.
+Historical implementation and validation chronology remains in Git history.

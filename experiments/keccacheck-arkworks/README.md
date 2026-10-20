@@ -8,8 +8,8 @@ reference's direct input-bit verification mode. The circuit side now uses
 arkworks 0.6, matching Mirage; the pinned native Rust prover remains on 0.5 and
 crosses that boundary through canonical BN254 scalar values.
 
-It is still experimental, but the integration branch now supplies a deferred
-backend used by the real Mirage relation and an alternate Rust prover API.
+The deferred backend is used by the Mirage Keccacheck relations and prover APIs.
+Cryptographic review of the transcript adaptation remains a release gate.
 
 The runtime path is Rust-only. The gnark source is neither linked nor executed;
 it was used as a readable reference for the circuit formulas. Cargo currently
@@ -40,10 +40,28 @@ The native witness generator runs Keccacheck's GKR prover over a power-of-two
 batch of Keccak-f permutations. The arkworks gadget verifies that proof *inside*
 the surrounding R1CS and binds the claimed inputs and outputs. It is therefore
 not a second proof checked alongside Groth16 and does not move Keccak checking
-on-chain. The final deployment would still expose one ordinary Groth16 proof.
+on-chain. The integration exposes one ordinary Groth16 proof.
 
 The upstream gnark wrapper derives an output challenge using gnark's extended
 Groth16 commitment API. Stock arkworks Groth16 has no equivalent API, so this
 experiment derives that challenge in-circuit with the pinned Poseidon2
 transcript after absorbing every claimed output word. This is a protocol
 adaptation and must receive cryptographic review before production use.
+
+## Review requirements
+
+The output challenge absorbs all claimed output words before it is squeezed.
+The main transcript absorbs that challenge before subsequent challenges and
+absorbs proof values before the challenges testing them. Unlike the upstream
+commitment API, this construction binds output words rather than a Groth16
+witness commitment; equivalence requires cryptographic sign-off.
+
+`derive_r_var` and the main transcript start separate sponges from the same
+initial state without domain tags. Different absorb sequences are not by
+themselves a proof that domain separation is unnecessary. Any transcript change
+must be coordinated with the pinned native prover and requires new circuit keys.
+
+Differential Poseidon2/Keccak tests, proof/output mutation tests, singleton-batch
+coverage and full-relation adversarial tests live alongside the implementation.
+They complement, but do not replace, protocol review. Payment uniqueness and
+other integration requirements are recorded in [FINDINGS.md](../../FINDINGS.md).
