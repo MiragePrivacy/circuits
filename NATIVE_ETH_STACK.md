@@ -1,5 +1,20 @@
 # Native ETH with Keccacheck
 
+## Statement-bound Keccacheck transcript (2026-10-20)
+
+The Keccacheck output challenge now absorbs every claimed input and output
+word, packed three 64-bit words per field element, and batches have at least
+two permutations. Packing makes the binding cheaper even though it now covers
+the inputs: at 64 instances it drops from 88,800 to 59,385 constraints.
+
+| Circuit | Before | After |
+|---|---:|---:|
+| ERC-20 Keccacheck | 1,889,993 | 1,860,578 |
+| Native Keccacheck | 2,046,951 | 2,017,536 |
+
+Both verifying keys changed; the verifiers and proof fixtures in `contracts/`
+are regenerated. The benchmarks below predate this change.
+
 ## Field-level parsing and current-network bounds (2026-10-01)
 
 | Stage | Before | After |

@@ -25,7 +25,7 @@ Run the fast comparison with:
 
 ```sh
 nix develop -c cargo run --release --manifest-path \
-  experiments/keccacheck-arkworks/Cargo.toml -- compare 1 2 8
+  experiments/keccacheck-arkworks/Cargo.toml -- compare 2 8
 ```
 
 The comparison reports native proof construction, arkworks synthesis,
@@ -45,5 +45,25 @@ on-chain. The final deployment would still expose one ordinary Groth16 proof.
 The upstream gnark wrapper derives an output challenge using gnark's extended
 Groth16 commitment API. Stock arkworks Groth16 has no equivalent API, so this
 experiment derives that challenge in-circuit with the pinned Poseidon2
-transcript after absorbing every claimed output word. This is a protocol
-adaptation and must receive cryptographic review before production use.
+transcript after absorbing the full claimed statement: every input and output
+word. This is a protocol adaptation and must receive cryptographic review
+before production use.
+
+## Review requirements
+
+The output challenge `r` absorbs a domain tag, the instance count, then every
+claimed input and output word (three 64-bit words per field element) before it
+is squeezed. The main transcript absorbs `r` before any other challenge and
+absorbs proof values before the challenges testing them, so every challenge
+depends on the whole statement. Binding only the outputs would leave the
+final input check at an already-fixed point (weak Fiat-Shamir). Unlike the
+upstream commitment API, this construction binds the statement words rather
+than a Groth16 witness commitment; equivalence requires cryptographic sign-off.
+
+Batches have at least `MIN_INSTANCES = 2` permutations. A singleton batch has
+no `r`, so its `beta` challenges are constants and an LLL-short kernel vector
+of them forges outputs; `KeccacheckBatch` pads one permutation to two.
+
+`r` is computed by Mirage and passed to the unmodified upstream prover, so
+its derivation can change without forking the protocol. Any transcript change
+still requires new circuit keys.
