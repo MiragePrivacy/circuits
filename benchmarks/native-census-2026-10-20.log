@@ -1,0 +1,29 @@
+                   alloc:      62276
+              commitment:       4174
+              opening-eq:        121
+            header-parse:         66
+             header-hash:      18163
+                   lease:       3957
+                 tx-trie:     101779
+            receipt-trie:     107446
+         native-transfer:       4243
+        receipt-envelope:         15
+               statement:       5994
+census: 2046951 constraints, 59627259 non-zeros, ~2.22 GiB as (Fr, usize)
+                       stage constraints    non-zeros  per row   share
+                       alloc       62276       186828      3.0    0.3%
+                  commitment        4174        15520      3.7    0.0%
+                  opening-eq         121         2049     16.9    0.0%
+                header-parse          66          841     12.7    0.0%
+                 header-hash       18163        73418      4.0    0.1%
+                       lease        3957        13303      3.4    0.0%
+                     tx-trie      101779       658795      6.5    1.1%
+                receipt-trie      107446       692224      6.4    1.2%
+             native-transfer        4243        75711     17.8    0.1%
+            receipt-envelope          15          223     14.9    0.0%
+                   statement        5994        20620      3.4    0.0%
+    verifier: output binding       88800      7575072     85.3   12.7%
+  verifier: output reduction       10008       380625     38.0    0.6%
+         verifier: 24 rounds     1546910     49405087     31.9   82.9%
+     verifier: input binding       92999       526943      5.7    0.9%
+widest row 3907 non-zeros; 248870 rows above 64

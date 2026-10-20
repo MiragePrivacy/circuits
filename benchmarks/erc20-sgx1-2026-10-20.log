@@ -1,0 +1,20 @@
+== stopping fela3 node 19:39:03
+ Container sepolia-fela3-nomad-1 Stopping 
+ Container sepolia-fela3-nomad-1 Stopped 
+               total        used        free      shared  buff/cache   available
+Mem:              62          22          34          20          27          39
+Swap:              0           0           0
+== bench start 19:39:06 args: --circuit erc20 --setup-threads 16 --plan chunked-262144:16,chunked-262144:16,chunked-262144:16
+circuit=erc20 setup_threads=16 plan=[(Prover(Chunked(262144)), 16), (Prover(Chunked(262144)), 16), (Prover(Chunked(262144)), 16)]
+setup threads=16: 338.6s, heap peak 9.36 GiB (resident before 0.00 GiB, after 0.69 GiB)
+proving key resident: 0.69 GiB
+prove mode=Prover(Chunked(262144)) threads=16: 83.4s, heap peak 2.06 GiB (resident before 0.69 GiB, after 0.69 GiB)
+  verified: true
+prove mode=Prover(Chunked(262144)) threads=16: 83.1s, heap peak 2.06 GiB (resident before 0.69 GiB, after 0.69 GiB)
+  verified: true
+prove mode=Prover(Chunked(262144)) threads=16: 82.2s, heap peak 2.06 GiB (resident before 0.69 GiB, after 0.69 GiB)
+  verified: true
+== bench exit 0 19:49:44
+== restarting fela3 node 19:49:44
+ Container sepolia-fela3-nomad-1 Starting 
+ Container sepolia-fela3-nomad-1 Started 
