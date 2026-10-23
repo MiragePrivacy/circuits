@@ -1,0 +1,54 @@
+   Compiling mirage-prover v0.1.0 (/home/oz/Code/mirage/circuits-worktrees/native-eth-keccacheck/crates/prover)
+    Finished `release` profile [optimized] target(s) in 15.83s
+     Running `target/release/measure-native --iterations 3`
+scope: commitment + header + dual MPT inclusion + native transfer relation + statement hash
+backend: Keccacheck
+threads: 16; proofs: 3
+bounds: tx 260 B / node 544 B / depth 7, receipt 396 B / node 544 B / depth 7, header 679 B
+trie layout: constructed leaves; ancestor caps 308 B root / 532 B deeper
+constraints: 2046951
+Start:   Groth16::Generator
+··Start:   Constraint synthesis
+··End:     Constraint synthesis ....................................................587.814ms
+··Start:   Inlining LCs
+····Start:   Finalize GR1CS
+······Start:   Inline/Outline LCs
+······End:     Inline/Outline LCs ..................................................12.675s
+······Start:   Instance Outlining
+······End:     Instance Outlining ..................................................111ns
+····End:     Finalize GR1CS ........................................................12.675s
+··End:     Inlining LCs ............................................................12.675s
+··Start:   Constructing evaluation domain
+··End:     Constructing evaluation domain ..........................................8.504µs
+··Start:   R1CS to QAP Instance Map with Evaluation
+····Start:   Evaluate Lagrange coefficients
+····End:     Evaluate Lagrange coefficients ........................................111.848ms
+··End:     R1CS to QAP Instance Map with Evaluation ................................2.566s
+··Start:   Compute G2 table
+··End:     Compute G2 table ........................................................75.382ms
+··Start:   Calculate B G2 of size 2038281
+··End:     Calculate B G2 of size 2038281 ..........................................1.588s
+··Start:   Compute G1 window table
+··End:     Compute G1 window table .................................................26.990ms
+··Start:   Generate the R1CS proving key
+····Start:   Calculate A
+····End:     Calculate A ...........................................................877.144ms
+····Start:   Calculate B G1
+····End:     Calculate B G1 ........................................................654.606ms
+····Start:   Calculate H
+····End:     Calculate H ...........................................................1.072s
+····Start:   Calculate L
+····End:     Calculate L ...........................................................923.040ms
+··End:     Generate the R1CS proving key ...........................................3.527s
+··Start:   Generate the R1CS verification key
+··End:     Generate the R1CS verification key ......................................489.558µs
+End:     Groth16::Generator ........................................................21.064s
+setup_seconds: 21.065
+proving_key_gib: 0.732
+compressed_proving_key_gib: 0.366
+peak_rss_after_setup_gib: 9.144
+proof_1_seconds: 7.136
+proof_2_seconds: 7.303
+proof_3_seconds: 7.633
+median_prove_seconds: 7.303
+peak_prove_rss_gib: 3.586

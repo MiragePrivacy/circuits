@@ -1,0 +1,9 @@
+circuit=native setup_threads=16 plan=[(Prover(Whole), 16), (Prover(Whole), 16), (Prover(Whole), 16)]
+setup threads=16: 23.7s, heap peak 9.67 GiB (resident before 0.00 GiB, after 0.73 GiB)
+proving key resident: 0.73 GiB
+prove mode=Prover(Whole) threads=16: 7.8s, heap peak 2.11 GiB (resident before 0.73 GiB, after 0.73 GiB)
+  verified: true
+prove mode=Prover(Whole) threads=16: 8.1s, heap peak 2.11 GiB (resident before 0.73 GiB, after 0.73 GiB)
+  verified: true
+prove mode=Prover(Whole) threads=16: 8.1s, heap peak 2.11 GiB (resident before 0.73 GiB, after 0.73 GiB)
+  verified: true

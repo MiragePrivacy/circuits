@@ -1,0 +1,25 @@
+              allocation:      37062
+       intent commitment:       4174
+        context equality:        121
+            header parse:         66
+             header hash:      20397
+       block/time checks:       3957
+           MPT traversal:     110761
+        receipt relation:       2535
+          statement hash:       5994
+census: 1889993 constraints, 56903301 non-zeros, ~2.12 GiB as (Fr, usize)
+                       stage constraints    non-zeros  per row   share
+                  allocation       37062       111186      3.0    0.2%
+           intent commitment        4174        15520      3.7    0.0%
+            context equality         121         2050     16.9    0.0%
+                header parse          66          841     12.7    0.0%
+                 header hash       20397        81311      4.0    0.1%
+           block/time checks        3957        13303      3.4    0.0%
+               MPT traversal      110761       708769      6.4    1.2%
+            receipt relation        2535        33696     13.3    0.1%
+              statement hash        5994        20620      3.4    0.0%
+    verifier: output binding       88800      5808672     65.4   10.2%
+  verifier: output reduction        9433       341525     36.2    0.6%
+         verifier: 24 rounds     1546910     49405087     31.9   86.8%
+     verifier: input binding       59783       360721      6.0    0.6%
+widest row 2435 non-zeros; 246794 rows above 64
