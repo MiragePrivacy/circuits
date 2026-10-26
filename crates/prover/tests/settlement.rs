@@ -1,23 +1,25 @@
 //! The library proving path produces what the escrow expects.
 
-use mirage_prover::{check_bounds, prove_seeded, setup, Keys, SettlementError};
+use mirage_prover::{
+    check_bounds, prove_keccacheck_seeded, setup_keccacheck, Keys, SettlementError,
+};
 use mirage_relation::{fixture, Bounds};
 use std::sync::OnceLock;
 
-/// One setup for the whole binary.
+/// One setup for the whole binary, over the Keccacheck relation that ships.
 ///
-/// Setup costs ~33s and ~8.7 GiB. Run per test and in parallel it exhausts
-/// memory before any assertion is reached, so every test shares this key.
+/// Run per test and in parallel, setup exhausts memory before any assertion
+/// is reached, so every test shares this key.
 fn keys() -> &'static Keys {
     static KEYS: OnceLock<Keys> = OnceLock::new();
-    KEYS.get_or_init(|| setup(Bounds::default(), 0).expect("setup"))
+    KEYS.get_or_init(|| setup_keccacheck(Bounds::default(), 0).expect("setup"))
 }
 
 #[test]
 fn proves_and_self_checks_a_genuine_settlement() {
     let bounds = Bounds::default();
     let keys = keys();
-    let settlement = prove_seeded(keys, bounds, &fixture::genuine(), 0).expect("prove");
+    let settlement = prove_keccacheck_seeded(keys, bounds, &fixture::genuine(), 0).expect("prove");
 
     // The signals must be the ones the native encoder derives, since that is
     // what the escrow recomputes from its own storage.
@@ -46,6 +48,22 @@ fn rejects_a_witness_past_a_bound() {
             assert!(msg.contains("receipt"), "unhelpful message: {msg}")
         }
         other => panic!("expected a bounds error, got {other:?}"),
+    }
+}
+
+#[test]
+fn rejects_a_witness_distance_outside_the_compiled_range() {
+    let bounds = Bounds::default();
+    for distance in [0, bounds.min_distance - 1, bounds.max_distance + 1] {
+        let mut w = fixture::genuine();
+        let tx = w.headers.pop().unwrap();
+        w.headers = fixture::descendants(tx, fixture::TX_BLOCK_NUMBER, distance);
+        match check_bounds(bounds, &w) {
+            Err(SettlementError::Bounds(msg)) => {
+                assert!(msg.contains("distance"), "unhelpful message: {msg}")
+            }
+            other => panic!("distance {distance}: expected a bounds error, got {other:?}"),
+        }
     }
 }
 
@@ -182,7 +200,7 @@ fn a_saved_proving_key_reloads_to_the_same_setup() {
 
     // A proof from the reloaded key must still self-check, which the compressed
     // round trip would also have to satisfy.
-    prove_seeded(
+    prove_keccacheck_seeded(
         &Keys {
             pk: reloaded,
             vk: keys.vk.clone(),

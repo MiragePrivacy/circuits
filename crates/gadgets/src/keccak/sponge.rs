@@ -32,8 +32,11 @@ use ark_ff::PrimeField;
 use ark_r1cs_std::boolean::Boolean;
 use ark_r1cs_std::convert::ToBitsGadget;
 use ark_r1cs_std::fields::fp::FpVar;
+use ark_r1cs_std::alloc::AllocVar;
+use ark_r1cs_std::fields::FieldVar;
 use ark_r1cs_std::uint8::UInt8;
-use ark_relations::gr1cs::SynthesisError;
+use ark_r1cs_std::GR1CSVar;
+use ark_relations::gr1cs::{ConstraintSystemRef, SynthesisError};
 
 use super::permutation::{DirectPermutation, PermutationBackend, State};
 use super::{DELIM_KECCAK, RATE};
@@ -237,6 +240,123 @@ pub fn keccak256_var_with<F: PrimeField, B: PermutationBackend<F>>(
     }
 
     Ok(chosen)
+}
+
+/// Keccak-256 of a private message that pads to exactly `blocks` rate blocks,
+/// witnessed as the rate half of each permutation input.
+///
+/// [`keccak256_var`] allocates every message bit and XORs it into the state,
+/// two constraints per bit past the first block, then masks every byte and
+/// selects across every block end. Here the absorbed state bits are the
+/// witness, one constraint each, and a message byte costs its eight XORs only
+/// when [`Self::byte`] reads it. The length is private but confined to
+/// `(blocks - 1) * RATE..blocks * RATE`, so the final block is fixed and only
+/// its padding is checked, about four constraints per byte.
+pub struct AbsorbedMessage<F: PrimeField> {
+    /// Each permutation's input state.
+    inputs: Vec<State<F>>,
+    /// The state each block was absorbed into; all zero for the first.
+    before: Vec<State<F>>,
+    pub digest: [Byte<F>; 32],
+}
+
+impl<F: PrimeField> AbsorbedMessage<F> {
+    /// Hashes `message` in exactly `blocks` permutations. A message shorter
+    /// than `(blocks - 1) * RATE` leaves the system unsatisfied.
+    pub fn new<B: PermutationBackend<F>>(
+        cs: ConstraintSystemRef<F>,
+        message: &[u8],
+        blocks: usize,
+        backend: &mut B,
+    ) -> Result<Self, SynthesisError> {
+        assert!(message.len() < blocks * RATE, "message exceeds {blocks} blocks");
+        let mut padded = message.to_vec();
+        padded.resize(blocks * RATE, 0);
+        padded[message.len()] ^= DELIM_KECCAK;
+        padded[blocks * RATE - 1] ^= 0x80;
+        let tail = F::from(message.len() as u64) - F::from(((blocks - 1) * RATE) as u64);
+        Self::absorb(cs, &padded, tail, backend)
+    }
+
+    /// Absorbs `padded` as given and checks it is a message ending `tail`
+    /// bytes into the final block, padded.
+    fn absorb<B: PermutationBackend<F>>(
+        cs: ConstraintSystemRef<F>,
+        padded: &[u8],
+        tail: F,
+        backend: &mut B,
+    ) -> Result<Self, SynthesisError> {
+        let blocks = padded.len() / RATE;
+        let mut st = empty_state::<F>();
+        let mut inputs = Vec::with_capacity(blocks);
+        let mut before = Vec::with_capacity(blocks);
+        for block in padded.chunks_exact(RATE) {
+            let mut input = st.clone();
+            for (i, &byte) in block.iter().enumerate() {
+                for bit in 0..8 {
+                    let (lane, pos) = (i / 8, (i % 8) * 8 + bit);
+                    let prev = st[lane][pos].clone();
+                    input[lane][pos] = Boolean::new_witness(cs.clone(), || {
+                        Ok(((byte >> bit) & 1 == 1) ^ prev.value()?)
+                    })?;
+                }
+            }
+            before.push(st);
+            st = backend.permute(input.clone())?;
+            inputs.push(input);
+        }
+        let hash = Self {
+            digest: squeeze_256(&st),
+            inputs,
+            before,
+        };
+        hash.enforce_padding(&FpVar::new_witness(cs, || Ok(tail))?)?;
+        Ok(hash)
+    }
+
+    /// Requires every final-block byte from `tail` on to be the padding: the
+    /// delimiter at `tail`, `0x80` in the last byte, zero elsewhere.
+    fn enforce_padding(&self, tail: &FpVar<F>) -> Result<(), SynthesisError> {
+        // The last byte is never message, so the mask stops one short.
+        let sel = prefix_mask_exact(tail, RATE - 1)?;
+        let kept = |j: usize| sel.get(j).map_or(FpVar::zero(), |s| FpVar::from(s.clone()));
+        let last = self.inputs.len() - 1;
+        let (absorbed, prior) = (&self.inputs[last], &self.before[last]);
+        for j in 0..RATE {
+            let past = FpVar::one() - kept(j);
+            // The mask is a prefix, so its falling edge is linear.
+            let delim = match j {
+                0 => past.clone(),
+                _ => kept(j - 1) - kept(j),
+            };
+            let pad = if j == RATE - 1 { 0x80u8 } else { 0 };
+            let (lane, at) = (j / 8, (j % 8) * 8);
+            // Zero exactly when the absorbed byte is the prior state XOR `pad`.
+            let mut diff = FpVar::zero();
+            for k in 0..8 {
+                let bit = prior[lane][at + k].clone();
+                let want = if (pad >> k) & 1 == 1 { !bit } else { bit };
+                diff += (FpVar::from(absorbed[lane][at + k].clone()) - FpVar::from(want))
+                    * F::from(1u64 << k);
+            }
+            // At the delimiter bit 0 flips instead: absorbed minus prior is
+            // `1 - 2 * prior`, which no combination of the higher bits forms.
+            let prior0 = FpVar::from(prior[lane][at].clone());
+            let flip = &delim - (&delim * &prior0).double()?;
+            past.mul_equals(&diff, &flip)?;
+        }
+        Ok(())
+    }
+
+    /// Message byte `i`: free in the first block, eight constraints after.
+    pub fn byte(&self, i: usize) -> UInt8<F> {
+        let (block, within) = (i / RATE, i % RATE);
+        let (lane, at) = (within / 8, (within % 8) * 8);
+        let bits: Vec<_> = (0..8)
+            .map(|k| self.inputs[block][lane][at + k].clone() ^ &self.before[block][lane][at + k])
+            .collect();
+        UInt8::from_bits_le(&bits)
+    }
 }
 
 #[cfg(test)]
@@ -444,6 +564,89 @@ mod tests {
                 "{len} bytes ({blocks} blocks): {cost} constraints, {} per block",
                 cost / blocks
             );
+        }
+    }
+
+    fn message(len: usize) -> Vec<u8> {
+        (0..len).map(|i| (i * 7 % 251) as u8 + 1).collect()
+    }
+
+    fn absorbed(data: &[u8], blocks: usize) -> (bool, [u8; 32], Vec<u8>) {
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        let hash = AbsorbedMessage::new(cs.clone(), data, blocks, &mut DirectPermutation).unwrap();
+        let bytes = (0..data.len()).map(|i| hash.byte(i).value().unwrap()).collect();
+        (cs.is_satisfied().unwrap(), read_digest(&hash.digest), bytes)
+    }
+
+    #[test]
+    fn absorbed_matches_native_across_the_final_block() {
+        // First and last lengths of the block, and the delimiter meeting 0x80.
+        for len in [RATE, RATE + 1, 200, 2 * RATE - 2, 2 * RATE - 1] {
+            let data = message(len);
+            let (ok, digest, bytes) = absorbed(&data, 2);
+            assert!(ok, "rejected a {len} byte message");
+            assert_eq!(digest, mirage_encoding::keccak256(&data), "digest of {len} bytes");
+            assert_eq!(bytes, data, "bytes read back from {len} bytes");
+        }
+    }
+
+    #[test]
+    fn absorbed_matches_native_in_five_blocks() {
+        for len in [4 * RATE, 5 * RATE - 1] {
+            let data = message(len);
+            let (ok, digest, _) = absorbed(&data, 5);
+            assert!(ok, "rejected a {len} byte message");
+            assert_eq!(digest, mirage_encoding::keccak256(&data));
+        }
+    }
+
+    /// A message that ends before the final block would hash in fewer blocks.
+    #[test]
+    fn absorbed_rejects_a_message_short_of_the_final_block() {
+        assert!(!absorbed(&message(RATE - 1), 2).0, "accepted a one-block message");
+    }
+
+    fn forged(edit: impl FnOnce(&mut Vec<u8>, &mut u64)) -> bool {
+        let len = RATE + 40;
+        let mut padded = message(len);
+        padded.resize(2 * RATE, 0);
+        padded[len] ^= DELIM_KECCAK;
+        padded[2 * RATE - 1] ^= 0x80;
+        let mut tail = 40u64;
+        edit(&mut padded, &mut tail);
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        let _ = AbsorbedMessage::absorb(cs.clone(), &padded, Fr::from(tail), &mut DirectPermutation)
+            .unwrap();
+        cs.is_satisfied().unwrap()
+    }
+
+    #[test]
+    fn absorbed_rejects_forged_padding() {
+        assert!(forged(|_, _| {}), "rejected the genuine padding");
+        assert!(!forged(|_, t| *t += 1), "accepted a length past the delimiter");
+        assert!(!forged(|_, t| *t -= 1), "accepted a length before the last byte");
+        assert!(!forged(|p, _| p[RATE + 41] = 0x01), "accepted a byte after the delimiter");
+        assert!(!forged(|p, _| p[RATE + 40] ^= 0x02), "accepted a corrupted delimiter");
+        assert!(!forged(|p, _| p[2 * RATE - 1] = 0), "accepted a missing final bit");
+    }
+
+    #[test]
+    fn absorbed_cost() {
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        let mut batch = Recorder;
+        let _ = AbsorbedMessage::new(cs.clone(), &message(640), 5, &mut batch).unwrap();
+        println!("absorbed five-block message: {} constraints", cs.num_constraints());
+    }
+
+    /// Allocates outputs without constraining them, as a batched backend does.
+    struct Recorder;
+
+    impl PermutationBackend<Fr> for Recorder {
+        fn permute(&mut self, state: State<Fr>) -> Result<State<Fr>, SynthesisError> {
+            let cs = state[0][0].cs();
+            Ok(core::array::from_fn(|_| {
+                core::array::from_fn(|_| Boolean::new_witness(cs.clone(), || Ok(false)).unwrap())
+            }))
         }
     }
 }

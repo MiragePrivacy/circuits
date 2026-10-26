@@ -1,4 +1,4 @@
-//! The native-ETH exact-block dual-trie relation as a provable circuit.
+//! The native-ETH delayed-witness dual-trie relation as a provable circuit.
 //!
 //! The counterpart to [`crate::ReceiptCircuit`]. A native settlement moves ETH
 //! in the transaction itself and emits no log, so the settled recipient and
@@ -17,20 +17,18 @@
 //! the price of the native path.
 //!
 //! ```text
-//! commitment              -> recipient / amount, asset kind native
-//! header -> transactionsRoot -> MPT inclusion -> transaction -> to / value
-//! header -> receiptsRoot     -> MPT inclusion -> receipt     -> status == 1
-//! header -> keccak           -> statement's witnessBlockHash
-//! header.number              -> bondStartBlock < n <= bondDeadline
-//! statement context          -> keccak -> the two public signals
+//! commitment                   -> recipient / amount, asset kind native
+//! H[d] -> transactionsRoot     -> MPT inclusion -> transaction -> to / value
+//! H[d] -> receiptsRoot         -> MPT inclusion -> receipt     -> status == 1
+//! H[d] -> parent hashes -> H[0] -> statement's witnessBlockHash
+//! H[d].number                  -> bondStartBlock < n <= bondDeadline
+//! statement context            -> keccak -> the two public signals
 //! ```
 //!
 //! # Scope
 //!
-//! Step 3 of spec section 25: native ETH, transaction block public, no
-//! delayed-witness ancestry. As with step 2 the transaction block is public,
-//! which spec 5.3 marks testnet-only; step 5's ancestry chain is what closes
-//! that.
+//! Native ETH with positive delayed-witness ancestry (spec 12.7): the statement
+//! names only a later witness block, and `H[d]` is a private ancestor of it.
 //!
 //! # This circuit's proving time leaks the asset kind
 //!
@@ -59,9 +57,9 @@ use ark_r1cs_std::fields::fp::FpVar;
 use ark_r1cs_std::uint8::UInt8;
 use ark_relations::gr1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
 
+use mirage_gadgets::ancestry;
 use mirage_gadgets::bytes::alloc_bounded;
 use mirage_gadgets::commitment::ASSET_KIND_NATIVE;
-use mirage_gadgets::header;
 use mirage_gadgets::keccak::{DirectPermutation, PermutationBackend};
 use mirage_gadgets::mpt::{constructed_traverse::ConstructedLeafTraversal, ProofNode};
 use mirage_gadgets::receipt::envelope;
@@ -69,14 +67,14 @@ use mirage_gadgets::statement;
 use mirage_gadgets::transaction::{NativeIntent, NativeTransfer, TransactionRelation};
 
 use crate::{
-    alloc_opening, alloc_statement, enforce_bytes_equal, fixed_be_value, lt_u64, native_signals,
-    profile, Bounds, IntentOpening, StatementContext,
+    alloc_opening, alloc_statement, enforce_bytes_equal, fixed_be_value, lt_u64,
+    native_signals, profile, Bounds, IntentOpening, StatementContext,
 };
 
 /// What this circuit does and does not include, so the measured numbers are
 /// read correctly.
 pub const MEASUREMENT_SCOPE: &str =
-    "commitment + header + dual MPT inclusion + native transfer relation + statement hash";
+    "commitment + header chain + dual MPT inclusion + native transfer relation + statement hash";
 
 /// Compiled bounds for the native build.
 ///
@@ -123,7 +121,7 @@ impl Default for NativeBounds {
             key_bytes: 3,
             receipt_bytes: 396,
             header_bytes: 679,
-            depth: 7,
+            ..Bounds::default()
         };
         Self {
             transaction_bytes: 260,
@@ -142,8 +140,9 @@ impl Default for NativeBounds {
 pub struct NativeWitness {
     /// The trie key, `rlp(transactionIndex)`. Shared by both tries.
     pub key: Vec<u8>,
-    /// The RLP block header carrying both roots.
-    pub header: Vec<u8>,
+    /// RLP headers `H[0..=d]`: the statement's witness block first and the
+    /// transaction block carrying both roots last.
+    pub headers: Vec<Vec<u8>>,
 
     /// The settling transaction, envelope included.
     pub transaction: Vec<u8>,
@@ -275,9 +274,6 @@ pub fn generate_constraints_with_backend<F: PrimeField, B: PermutationBackend<F>
     let public_lo = FpVar::new_input(cs.clone(), || Ok(F::from(want_lo)))?;
 
     // ---- witness allocation ----
-    let header_bytes = alloc_bounded(cs.clone(), &w.header, b.common.header_bytes)?;
-    let header_len = FpVar::new_witness(cs.clone(), || Ok(F::from(w.header.len() as u64)))?;
-
     // One key, both tries. The transaction and its receipt sit at the same
     // index in their respective tries, which is what makes the two proofs
     // about the same transaction rather than two unrelated ones.
@@ -345,22 +341,19 @@ pub fn generate_constraints_with_backend<F: PrimeField, B: PermutationBackend<F>
     enforce_bytes_equal(&opening.row_index, &ctx.row_index)?;
 
     profile(&cs, "opening-eq", &mut mark);
-    // The header supplies both roots rather than the caller. Accepting
-    // caller-supplied roots would let a prover invent tries containing
-    // whatever it liked.
-    let parsed = header::parse_authenticated_prefix(&header_bytes, &header_len, &Boolean::TRUE)?;
-
-    profile(&cs, "header-parse", &mut mark);
-    // Authenticate the header itself: parsing roots out of it is not useful
-    // unless it is the exact witness block the verifier selected.
-    let header_digest =
-        mirage_gadgets::keccak::keccak256_var_with(&header_bytes, &header_len, backend)?;
-    for (got, want) in header_digest.iter().zip(ctx.witness_block_hash.iter()) {
-        UInt8::from_bits_le(got).enforce_equal(want)?;
-    }
-    profile(&cs, "header-hash", &mut mark);
-    let witness_number = fixed_be_value(&ctx.witness_block_number)?;
-    parsed.number.enforce_equal(&witness_number)?;
+    // The transaction header supplies both roots rather than the caller.
+    // Accepting caller-supplied roots would let a prover invent tries
+    // containing whatever it liked. That header is reached by parent hashes
+    // from the exact witness block the verifier selected.
+    let parsed = ancestry::verify_with(
+        cs.clone(),
+        &w.headers,
+        &b.common.chain(),
+        &ctx.witness_block_hash,
+        &fixed_be_value(&ctx.witness_block_number)?,
+        backend,
+    )?;
+    profile(&cs, "header-chain", &mut mark);
 
     // Settlement is valid only in the half-open/closed lease interval:
     // bondStartBlock < txBlockNumber <= bondDeadline.
@@ -425,7 +418,9 @@ pub fn public_signals(w: &NativeWitness) -> (u128, u128) {
 /// Exposed so the prover crate measures the same shape the relation tests do.
 pub mod fixture {
     use super::{NativeWitness, StatementContext};
-    use crate::fixture::{enc_list, enc_str, hex_prefix, keccak, to_nibbles, trim};
+    use crate::fixture::{
+        enc_list, enc_str, header_chain, hex_prefix, keccak, to_nibbles, trim, MIN_DISTANCE,
+    };
     use crate::IntentOpening;
 
     pub const RECIPIENT: [u8; 20] = [0x22; 20];
@@ -522,15 +517,14 @@ pub mod fixture {
         }
         .commitment();
 
-        // The header must carry both tries' actual roots, or neither binding
-        // chain closes.
-        let header =
-            crate::fixture::header_with_roots(&transactions_root, &receipts_root, 21_000_000);
-        let header_hash = keccak(&header);
+        // The transaction header must carry both tries' actual roots, or
+        // neither binding chain closes.
+        let headers = header_chain(&transactions_root, &receipts_root, TX_BLOCK_NUMBER, MIN_DISTANCE);
+        let header_hash = keccak(&headers[0]);
 
         NativeWitness {
             key,
-            header,
+            headers,
             transaction,
             transaction_nodes,
             receipt,
@@ -555,10 +549,25 @@ pub mod fixture {
                     a[24..].copy_from_slice(&1_000_000_000u64.to_be_bytes());
                     a
                 },
-                witness_block_number: 21_000_000,
+                witness_block_number: TX_BLOCK_NUMBER + MIN_DISTANCE as u64,
                 witness_block_hash: header_hash,
             },
         }
+    }
+
+    /// The genuine fixture's hidden transaction block. Its witness is block
+    /// 21,000,000, which the escrow fixtures roll to.
+    pub const TX_BLOCK_NUMBER: u64 = 20_999_992;
+
+    /// The fixture's chain over new trie roots, and the witness hash naming
+    /// its head.
+    pub fn chain_over(
+        transactions_root: &[u8; 32],
+        receipts_root: &[u8; 32],
+    ) -> (Vec<Vec<u8>>, [u8; 32]) {
+        let headers = header_chain(transactions_root, receipts_root, TX_BLOCK_NUMBER, MIN_DISTANCE);
+        let hash = keccak(&headers[0]);
+        (headers, hash)
     }
 }
 
@@ -675,12 +684,7 @@ mod tests {
 
         w.receipt = failed;
         w.receipt_nodes = vec![root_node.clone(), leaf];
-        w.header = crate::fixture::header_with_roots(
-            &crate::fixture::keccak(&w.transaction_nodes[0]),
-            &crate::fixture::keccak(&root_node),
-            21_000_000,
-        );
-        w.statement.witness_block_hash = crate::fixture::keccak(&w.header);
+        (w.headers, w.statement.witness_block_hash) = fixture::chain_over(&crate::fixture::keccak(&w.transaction_nodes[0]), &crate::fixture::keccak(&root_node));
 
         assert_rejected(w, "accepted a reverted transaction as a settlement");
     }
@@ -691,12 +695,7 @@ mod tests {
     #[test]
     fn rejects_a_foreign_transactions_root() {
         let mut w = fixture::genuine();
-        w.header = crate::fixture::header_with_roots(
-            &[0xab; 32],
-            &crate::fixture::keccak(&w.receipt_nodes[0]),
-            21_000_000,
-        );
-        w.statement.witness_block_hash = crate::fixture::keccak(&w.header);
+        (w.headers, w.statement.witness_block_hash) = fixture::chain_over(&[0xab; 32], &crate::fixture::keccak(&w.receipt_nodes[0]));
         assert_rejected(w, "accepted a transactions root the header does not carry");
     }
 
@@ -704,11 +703,11 @@ mod tests {
     #[test]
     fn rejects_a_block_outside_the_lease() {
         let mut w = fixture::genuine();
-        w.statement.bond_start_block = 21_000_000;
+        w.statement.bond_start_block = fixture::TX_BLOCK_NUMBER;
         assert_rejected(w, "accepted a block at bondStartBlock");
 
         let mut w = fixture::genuine();
-        w.statement.bond_deadline = 20_999_999;
+        w.statement.bond_deadline = fixture::TX_BLOCK_NUMBER - 1;
         assert_rejected(w, "accepted a block past bondDeadline");
     }
 
@@ -732,12 +731,7 @@ mod tests {
         let root_node = crate::fixture::enc_list(&children);
 
         w.receipt_nodes = vec![root_node.clone(), leaf];
-        w.header = crate::fixture::header_with_roots(
-            &crate::fixture::keccak(&w.transaction_nodes[0]),
-            &crate::fixture::keccak(&root_node),
-            21_000_000,
-        );
-        w.statement.witness_block_hash = crate::fixture::keccak(&w.header);
+        (w.headers, w.statement.witness_block_hash) = fixture::chain_over(&crate::fixture::keccak(&w.transaction_nodes[0]), &crate::fixture::keccak(&root_node));
 
         assert_rejected(w, "accepted a receipt from a different trie key");
     }
@@ -771,42 +765,58 @@ mod tests {
             };
             w.transaction_nodes = build(&w.transaction);
             w.receipt_nodes = build(&w.receipt);
-            w.header = crate::fixture::header_with_roots(
-                &keccak(&w.transaction_nodes[0]),
-                &keccak(&w.receipt_nodes[0]),
-                21_000_000,
-            );
-            w.statement.witness_block_hash = keccak(&w.header);
+            (w.headers, w.statement.witness_block_hash) = fixture::chain_over(&keccak(&w.transaction_nodes[0]), &keccak(&w.receipt_nodes[0]));
             assert!(satisfied(w), "failed at depth {depth}");
         }
     }
 
-    /// All permutations, including inactive padded trie slots, must go
+    /// All permutations, including inactive header and trie slots, must go
     /// through the same backend. This also checks that setup is witness-free.
     #[test]
     fn cost() {
         use ark_relations::gr1cs::SynthesisMode;
         let bounds = NativeBounds::default();
-        let direct = ConstraintSystem::<Fr>::new_ref();
-        direct.set_mode(SynthesisMode::Setup);
-        NativeCircuit::setup(bounds)
-            .generate_constraints(direct.clone())
-            .unwrap();
-        let direct_count = direct.num_constraints();
-        drop(direct);
-
         let cs = ConstraintSystem::<Fr>::new_ref();
         cs.set_mode(SynthesisMode::Setup);
         let mut batch = mirage_keccacheck_arkworks::batch::KeccacheckBatch::new(cs.clone());
         generate_constraints_with_backend(NativeCircuit::setup(bounds), cs.clone(), &mut batch)
             .unwrap();
         let result = batch.finish().unwrap();
-        assert_eq!((result.recorded, result.padded), (61, 64));
-        assert!(cs.num_constraints() < direct_count);
-        println!(
-            "native constraints: direct={direct_count}, Keccacheck={}",
-            cs.num_constraints()
-        );
+        // 56 relation permutations plus five per header slot.
+        let slots = bounds.common.max_distance + 1;
+        assert_eq!((result.recorded, result.padded), (56 + 5 * slots, 256));
+        assert_eq!(cs.num_constraints(), 3_235_943);
+    }
+
+    #[test]
+    fn accepts_the_maximum_distance() {
+        let mut w = fixture::genuine();
+        let max = NativeBounds::default().common.max_distance;
+        let tx = w.headers.pop().unwrap();
+        w.headers = crate::fixture::descendants(tx, fixture::TX_BLOCK_NUMBER, max);
+        w.statement.witness_block_number = fixture::TX_BLOCK_NUMBER + max as u64;
+        w.statement.witness_block_hash = crate::fixture::keccak(&w.headers[0]);
+        assert!(satisfied(w), "rejected a chain at the maximum distance");
+    }
+
+    /// **Forgery: the transaction block named as its own witness.**
+    #[test]
+    fn rejects_the_transaction_block_as_witness() {
+        let mut w = fixture::genuine();
+        let tx = w.headers.pop().unwrap();
+        w.statement.witness_block_hash = crate::fixture::keccak(&tx);
+        w.statement.witness_block_number = fixture::TX_BLOCK_NUMBER;
+        w.headers = vec![tx];
+        assert_rejected(w, "accepted a zero witness distance");
+    }
+
+    /// **Forgery: an intermediate header replaced, so the transaction header is
+    /// no longer an ancestor of the witness.**
+    #[test]
+    fn rejects_a_broken_ancestry_link() {
+        let mut w = fixture::genuine();
+        w.headers[3] = crate::fixture::header(&[0xfe; 32], &[0x0b; 32], &[0x0c; 32], 20_999_997);
+        assert_rejected(w, "accepted a chain with a broken parent link");
     }
 
     #[test]
@@ -819,12 +829,7 @@ mod tests {
     #[test]
     fn rejects_a_foreign_receipts_root() {
         let mut w = fixture::genuine();
-        w.header = crate::fixture::header_with_roots(
-            &crate::fixture::keccak(&w.transaction_nodes[0]),
-            &[0xab; 32],
-            21_000_000,
-        );
-        w.statement.witness_block_hash = crate::fixture::keccak(&w.header);
+        (w.headers, w.statement.witness_block_hash) = fixture::chain_over(&crate::fixture::keccak(&w.transaction_nodes[0]), &[0xab; 32]);
         assert_rejected(w, "accepted a receipts root unrelated to the receipt trie");
     }
 

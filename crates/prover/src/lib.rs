@@ -245,9 +245,7 @@ pub fn check_bounds(bounds: Bounds, w: &Witness) -> Result<(), SettlementError> 
             "{what} is {got} bytes, bound is {max}"
         )))
     };
-    if w.header.len() > bounds.header_bytes {
-        return over("header", w.header.len(), bounds.header_bytes);
-    }
+    check_chain(&bounds, &w.headers)?;
     if w.receipt.len() > bounds.receipt_bytes {
         return over("receipt", w.receipt.len(), bounds.receipt_bytes);
     }
@@ -259,6 +257,30 @@ pub fn check_bounds(bounds: Bounds, w: &Witness) -> Result<(), SettlementError> 
     }
     if let Some(n) = w.nodes.iter().find(|n| n.len() > bounds.node_bytes) {
         return over("trie node", n.len(), bounds.node_bytes);
+    }
+    Ok(())
+}
+
+/// Checks the header chain against the compiled distance range and header lengths.
+///
+/// A chain outside the range is not an error the circuit can name: it truncates or
+/// leaves the endpoint at the wrong slot, and the proof fails a link.
+fn check_chain(bounds: &Bounds, headers: &[Vec<u8>]) -> Result<(), SettlementError> {
+    let distance = headers.len().saturating_sub(1);
+    if headers.is_empty() || !(bounds.min_distance..=bounds.max_distance).contains(&distance) {
+        return Err(SettlementError::Bounds(format!(
+            "witness distance is {distance}, compiled range is {}..={}",
+            bounds.min_distance, bounds.max_distance
+        )));
+    }
+    let lengths = bounds.chain().header_range();
+    if let Some(h) = headers.iter().find(|h| !lengths.contains(&h.len())) {
+        return Err(SettlementError::Bounds(format!(
+            "header is {} bytes, compiled range is {}..={}",
+            h.len(),
+            lengths.start(),
+            lengths.end()
+        )));
     }
     Ok(())
 }
@@ -542,9 +564,7 @@ pub mod native {
                 "{what} is {got} bytes, bound is {max}"
             )))
         };
-        if w.header.len() > bounds.common.header_bytes {
-            return over("header", w.header.len(), bounds.common.header_bytes);
-        }
+        crate::check_chain(&bounds.common, &w.headers)?;
         if w.key.len() > bounds.common.key_bytes {
             return over("trie key", w.key.len(), bounds.common.key_bytes);
         }

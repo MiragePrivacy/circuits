@@ -30,15 +30,15 @@ the proof still verifies, the contract still pays, and nothing looks broken.
 | 2b | RLP, MPT, receipt relation | **done** — `crates/relation` |
 | 3 | Transaction parser + native dual-trie relation | **done** — `crates/gadgets/src/transaction`, `crates/relation/src/native.rs` |
 | 4 | Canonical escrow with embedded verifier | verifier exported and measured; escrow lives in the escrow repo |
-| 5 | Positive delayed-witness ancestry | not started |
+| 5 | Positive delayed-witness ancestry | **done** -- `crates/gadgets/src/ancestry.rs`, distance 8..=39; exported verifiers not yet regenerated |
 
 Step 2's relation closes the whole binding chain:
 
 ```
 commitment            -> settlement token / recipient / amount
-header -> receiptsRoot -> MPT inclusion -> receipt -> Transfer log
-header -> keccak       -> statement's witnessBlockHash
-header.number          -> bondStartBlock < n <= bondDeadline
+H[d] -> receiptsRoot   -> MPT inclusion -> receipt -> Transfer log
+H[d] -> parent hashes  -> H[0] -> statement's witnessBlockHash
+H[d].number            -> bondStartBlock < n <= bondDeadline
 statement context      -> keccak -> the two public signals
 ```
 
@@ -47,9 +47,14 @@ as a placeholder for a multiparty Phase 2. The verifier is structurally
 identical either way, so the size and gas figures hold; only the key's
 provenance differs.
 
-Step 2 deliberately reveals the transaction block; ancestry is step 5. Building
-them together would make it impossible to tell which half causes a constraint
-blowup.
+Step 5 hides the transaction block: the statement names a later witness block
+`H[0]`, and the circuit walks parent hashes back to the private transaction
+header `H[d]` for `8 <= d <= 39`. Every one of the 40 header slots is hashed
+whatever `d` is, at five Keccak-f permutations each, which keeps both relations
+inside a 256-permutation Keccacheck batch. Headers are witnessed as their
+absorbed sponge states and must be 544 to 679 bytes, so a chain header costs
+~14k constraints and only `parentHash` is read from it; the transaction header
+alone is parsed. ERC-20: 3,074,926 constraints; native: 3,235,943.
 
 ## Native ETH
 

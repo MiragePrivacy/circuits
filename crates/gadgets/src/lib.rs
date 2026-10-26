@@ -26,6 +26,7 @@
 //! `cs.is_satisfied()` in every gadget test, and assert on `num_constraints()`
 //! so a cost regression is visible in the diff.
 
+pub mod ancestry;
 pub mod bytes;
 pub mod commitment;
 pub mod header;
@@ -60,8 +61,10 @@ pub mod bounds {
     /// contain.
     pub const MAX_TRANSACTION_BYTES: usize = 512;
 
-    /// Unused in step 2, which reveals the transaction block. Step 5 adds the
-    /// ancestry chain that consumes these.
+    /// Ancestry distance range for [`crate::ancestry`]. Each header costs five
+    /// Keccak-f permutations at a 679-byte header bound; 39 is the largest
+    /// distance that keeps both relations within a 256-permutation Keccacheck
+    /// batch.
     pub const MIN_WITNESS_DISTANCE: usize = 8;
-    pub const MAX_WITNESS_DISTANCE: usize = 16;
+    pub const MAX_WITNESS_DISTANCE: usize = 39;
 }

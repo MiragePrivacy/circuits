@@ -46,12 +46,13 @@ fn main() {
         witness.statement.bond_start_block = 20_999_990;
         witness.statement.bond_deadline = witness.statement.bond_start_block + 75;
         witness.statement.witness_block_number = 20_999_999;
-        witness.header = fixture::header_with_roots(
+        witness.headers = fixture::header_chain(
             &[0x44; 32],
             &witness.root.clone().try_into().expect("receipt root"),
-            witness.statement.witness_block_number,
+            witness.statement.witness_block_number - fixture::MIN_DISTANCE as u64,
+            fixture::MIN_DISTANCE,
         );
-        witness.statement.witness_block_hash = fixture::keccak(&witness.header);
+        witness.statement.witness_block_hash = fixture::keccak(&witness.headers[0]);
         witness.intent.row_index = 1;
         witness.statement.row_index = 1;
         let i = &witness.intent;

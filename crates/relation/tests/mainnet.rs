@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use ark_bn254::Fr;
 use ark_relations::gr1cs::{ConstraintSynthesizer, ConstraintSystem};
 use mirage_relation::{
-    Bounds, IntentOpening, KeccacheckReceiptCircuit, StatementContext, Witness,
+    fixture, Bounds, IntentOpening, KeccacheckReceiptCircuit, StatementContext, Witness,
 };
 use serde::Deserialize;
 
@@ -83,12 +83,14 @@ fn arr<const N: usize>(s: &str) -> [u8; N] {
 }
 
 fn witness(f: &Fixture) -> Witness {
-    let header = bytes(&f.header);
+    // Synthetic descendants above the real transaction header stand in for
+    // the later canonical witness block.
+    let headers = fixture::descendants(bytes(&f.header), f.block_number, fixture::MIN_DISTANCE);
     Witness {
         root: bytes(&f.receipts_root),
         key: bytes(&f.key),
         receipt: bytes(&f.receipt),
-        header: header.clone(),
+        headers: headers.clone(),
         nodes: f.nodes.iter().map(|n| bytes(n)).collect(),
         log_index: 0,
         intent: IntentOpening {
@@ -122,10 +124,10 @@ fn witness(f: &Fixture) -> Witness {
                 a[24..].copy_from_slice(&1_000_000_000u64.to_be_bytes());
                 a
             },
-            witness_block_number: f.block_number,
-            // The header's own keccak, not a placeholder: the relation binds
-            // the parsed header to the block hash the statement names.
-            witness_block_hash: mirage_encoding::keccak256(&header),
+            witness_block_number: f.block_number + fixture::MIN_DISTANCE as u64,
+            // The witness header's own keccak: the chain reaches the real
+            // transaction header only through it.
+            witness_block_hash: mirage_encoding::keccak256(&headers[0]),
         },
     }
 }

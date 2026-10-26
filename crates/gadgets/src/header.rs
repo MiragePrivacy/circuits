@@ -13,8 +13,8 @@
 //! The ERC-20 relation needs two fields: `receiptsRoot` at index 5, which the
 //! MPT traversal authenticates against, and `number` at index 8, which the
 //! timing assertions use. The native relation additionally reads
-//! `transactionsRoot` at index 4 for its second trie. Step 5's ancestry chain
-//! will need `parentHash` at index 0.
+//! `transactionsRoot` at index 4 for its second trie. The ancestry chain in
+//! [`crate::ancestry`] reads `parentHash` at index 0.
 //!
 //! # Why the field count is enforced
 //!
@@ -111,6 +111,10 @@ pub fn parse<F: PrimeField>(
         number,
     })
 }
+
+/// The byte ranges [`parse_authenticated_prefix`] reads. A buffer passed to it
+/// may hold placeholders anywhere else.
+pub const AUTHENTICATED_PREFIX_READS: [core::ops::Range<usize>; 2] = [0..192, 448..458];
 
 /// Extracts the fields before the first variable-width header item using the
 /// fixed post-Prague prefix layout.
@@ -221,7 +225,7 @@ fn big_endian_value<F: PrimeField>(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use ark_bn254::Fr;
     use ark_r1cs_std::alloc::AllocVar;
@@ -269,8 +273,17 @@ mod tests {
 
     /// A 21-field header with recognisable roots and a given block number.
     pub fn header_fixture(receipts_root: &[u8; 32], number: u64) -> Vec<u8> {
+        header_with_parent(&[0x01; 32], receipts_root, number)
+    }
+
+    /// [`header_fixture`] with a chosen `parentHash`.
+    pub(crate) fn header_with_parent(
+        parent_hash: &[u8; 32],
+        receipts_root: &[u8; 32],
+        number: u64,
+    ) -> Vec<u8> {
         let mut fields: Vec<Vec<u8>> = Vec::with_capacity(FIELD_COUNT);
-        fields.push(enc_str(&[0x01; 32])); // parentHash
+        fields.push(enc_str(parent_hash)); // parentHash
         fields.push(enc_str(&[0x02; 32])); // ommersHash
         fields.push(enc_str(&[0x03; 20])); // beneficiary
         fields.push(enc_str(&[0x04; 32])); // stateRoot

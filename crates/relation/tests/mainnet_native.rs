@@ -30,7 +30,7 @@ use std::path::PathBuf;
 use ark_bn254::Fr;
 use ark_relations::gr1cs::{ConstraintSynthesizer, ConstraintSystem};
 use mirage_relation::native::{KeccacheckNativeCircuit, NativeBounds, NativeCircuit, NativeWitness};
-use mirage_relation::{Bounds, IntentOpening, StatementContext};
+use mirage_relation::{fixture, Bounds, IntentOpening, StatementContext};
 use serde::Deserialize;
 
 mod common;
@@ -104,11 +104,14 @@ fn arr<const N: usize>(s: &str) -> [u8; N] {
     out
 }
 
-fn witness(f: &Fixture) -> NativeWitness {
-    let header = bytes(&f.header);
+fn witness(f: &Fixture, b: &NativeBounds) -> NativeWitness {
+    // Synthetic descendants above the real transaction header stand in for
+    // the later canonical witness block.
+    let distance = b.common.min_distance;
+    let headers = fixture::descendants(bytes(&f.header), f.block_number, distance);
     NativeWitness {
         key: bytes(&f.key),
-        header: header.clone(),
+        headers: headers.clone(),
         transaction: bytes(&f.transaction),
         transaction_nodes: f.transaction_nodes.iter().map(|n| bytes(n)).collect(),
         receipt: bytes(&f.receipt),
@@ -143,10 +146,18 @@ fn witness(f: &Fixture) -> NativeWitness {
                 a[24..].copy_from_slice(&1_000_000_000u64.to_be_bytes());
                 a
             },
-            witness_block_number: f.block_number,
-            witness_block_hash: mirage_encoding::keccak256(&header),
+            witness_block_number: f.block_number + distance as u64,
+            witness_block_hash: mirage_encoding::keccak256(&headers[0]),
         },
     }
+}
+
+/// Direct-Keccak measurements of the trie and receipt buffers carry the
+/// shortest chain, so the header slots do not swamp what they measure.
+fn short_chain(mut b: NativeBounds) -> NativeBounds {
+    b.common.min_distance = 1;
+    b.common.max_distance = 1;
+    b
 }
 
 /// Bounds wide enough for the fixtures under test.
@@ -163,18 +174,18 @@ fn bounds_for(fixtures: &[&Fixture]) -> NativeBounds {
     let round_up = |v: usize| v.div_ceil(64) * 64;
 
     let d = NativeBounds::default();
-    NativeBounds {
+    short_chain(NativeBounds {
         common: Bounds {
             node_bytes: round_up(max(&|f| f.max_receipt_node_bytes).max(1)),
             key_bytes: d.common.key_bytes,
             receipt_bytes: round_up(max(&|f| f.receipt_bytes).max(1)),
-            header_bytes: round_up(max(&|f| f.header_bytes).max(1)),
             depth: max(&|f| f.receipt_depth).max(1),
+            ..d.common
         },
         transaction_bytes: round_up(max(&|f| f.transaction_bytes).max(1)),
         transaction_node_bytes: round_up(max(&|f| f.max_transaction_node_bytes).max(1)),
         transaction_depth: max(&|f| f.transaction_depth).max(1),
-    }
+    })
 }
 
 /// The bare sends must satisfy the relation at the **compiled** bounds.
@@ -232,7 +243,7 @@ fn bare_sends_satisfy_the_compiled_bounds() {
         |f| format!("{} (block {}, type {})", f.tx_hash, f.block_number, f.transaction_type),
         |f| {
             let cs = ConstraintSystem::<Fr>::new_ref();
-            KeccacheckNativeCircuit::prove(b, witness(f))
+            KeccacheckNativeCircuit::prove(b, witness(f, &b))
                 .generate_constraints(cs.clone())
                 .expect("synthesis");
             cs.finalize();
@@ -290,7 +301,7 @@ fn value_carrying_calls_are_rejected() {
     let mut accepted = Vec::new();
     for f in &calls {
         let cs = ConstraintSystem::<Fr>::new_ref();
-        NativeCircuit::prove(b, witness(f))
+        NativeCircuit::prove(b, witness(f, &b))
             .generate_constraints(cs.clone())
             .expect("synthesis");
         if cs.is_satisfied().unwrap_or(false) {
@@ -369,21 +380,21 @@ fn cost_scales_with_the_observed_distribution() {
         // size under study and what the fixture itself needs.
         let round = |v: usize| v.div_ceil(64) * 64;
         let at = |v: usize| round(size.max(v));
-        let b = NativeBounds {
+        let b = short_chain(NativeBounds {
             common: Bounds {
                 node_bytes: at(smallest.max_receipt_node_bytes),
                 key_bytes: NativeBounds::default().common.key_bytes,
                 receipt_bytes: at(smallest.receipt_bytes),
-                header_bytes: round(smallest.header_bytes),
                 depth: smallest.receipt_depth,
+                ..Bounds::default()
             },
             transaction_bytes: at(smallest.transaction_bytes),
             transaction_node_bytes: at(smallest.max_transaction_node_bytes),
             transaction_depth: smallest.transaction_depth,
-        };
+        });
 
         let cs = ConstraintSystem::<Fr>::new_ref();
-        NativeCircuit::prove(b, witness(smallest))
+        NativeCircuit::prove(b, witness(smallest, &b))
             .generate_constraints(cs.clone())
             .expect("synthesis");
         let n = cs.num_constraints();
@@ -431,7 +442,7 @@ fn the_largest_call_exceeds_available_memory() {
         .expect("non-empty");
     let b = bounds_for(&[largest]);
     let cs = ConstraintSystem::<Fr>::new_ref();
-    NativeCircuit::prove(b, witness(largest))
+    NativeCircuit::prove(b, witness(largest, &b))
         .generate_constraints(cs.clone())
         .expect("synthesis");
     eprintln!(
@@ -603,7 +614,7 @@ fn keccak_alignment_of_the_node_bound() {
             eprintln!("  {node_bytes:4} -> below the observed max, skipped");
             continue;
         }
-        let d0 = NativeBounds::default();
+        let d0 = short_chain(NativeBounds::default());
         let b = NativeBounds {
             common: Bounds {
                 node_bytes,
@@ -613,7 +624,7 @@ fn keccak_alignment_of_the_node_bound() {
             ..d0
         };
         let cs = ConstraintSystem::<Fr>::new_ref();
-        NativeCircuit::prove(b, witness(smallest))
+        NativeCircuit::prove(b, witness(smallest, &b))
             .generate_constraints(cs.clone())
             .expect("synthesis");
         let n = cs.num_constraints();
@@ -663,7 +674,7 @@ fn keccak_aligned_bounds() {
         .min_by_key(|f| f.receipt_bytes)
         .expect("a bare send");
 
-    let base = NativeBounds::default();
+    let base = short_chain(NativeBounds::default());
     // Largest value in the same block as each observed maximum:
     //   node 532 -> 543, receipt 393 -> 407, header 652 -> 679, tx 122 -> 407
     // The transaction buffer keeps 407 rather than 135 so a settlement with a
@@ -682,7 +693,7 @@ fn keccak_aligned_bounds() {
 
     let measure = |b: NativeBounds| {
         let cs = ConstraintSystem::<Fr>::new_ref();
-        NativeCircuit::prove(b, witness(smallest))
+        NativeCircuit::prove(b, witness(smallest, &b))
             .generate_constraints(cs.clone())
             .expect("synthesis");
         assert!(cs.is_satisfied().unwrap(), "unsatisfied");
@@ -747,7 +758,7 @@ fn keccacheck_covers_mainnet_envelopes_and_deepest_tries() {
     }
     for f in selected.values() {
         let cs = ConstraintSystem::<Fr>::new_ref();
-        KeccacheckNativeCircuit::prove(NativeBounds::default(), witness(f))
+        KeccacheckNativeCircuit::prove(NativeBounds::default(), witness(f, &NativeBounds::default()))
             .generate_constraints(cs.clone())
             .expect("batched synthesis");
         cs.finalize();
