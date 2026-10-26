@@ -123,9 +123,9 @@ fn eval_eq(r: &[FpVar<Fr>]) -> Vec<FpVar<Fr>> {
 
 fn eval_mle_with_eq(mle: &[FpVar<Fr>], eq: &[FpVar<Fr>]) -> FpVar<Fr> {
     assert_eq!(mle.len(), eq.len());
-    mle.iter()
-        .zip(eq)
-        .fold(FpVar::Constant(Fr::zero()), |acc, (a, b)| acc + a * b)
+    // One flat sum: a running fold leaves a chain of partial sums that LC
+    // inlining expands quadratically in the table size.
+    mle.iter().zip(eq).map(|(a, b)| a * b).sum()
 }
 
 fn eval_mle(mle: &[FpVar<Fr>], r: &[FpVar<Fr>]) -> FpVar<Fr> {
@@ -439,11 +439,14 @@ fn derive_r_var(
         .chain(output_bits.chunks(64 * WORDS_PER_ELEMENT))
     {
         let mut power = Fr::one();
-        let mut packed = FpVar::Constant(Fr::zero());
-        for bit in chunk {
-            packed += bit * power;
-            power.double_in_place();
-        }
+        let packed: FpVar<Fr> = chunk
+            .iter()
+            .map(|bit| {
+                let term = bit * power;
+                power.double_in_place();
+                term
+            })
+            .sum();
         sponge.absorb(&packed);
     }
     (0..log_instances).map(|_| sponge.squeeze()).collect()
@@ -571,11 +574,7 @@ fn verify_allocated(
     let output = output_bits
         .chunks_exact(64)
         .map(|bits| {
-            bits.iter()
-                .zip(&powers)
-                .fold(FpVar::Constant(Fr::zero()), |acc, (bit, power)| {
-                    acc + bit * *power
-                })
+            bits.iter().zip(&powers).map(|(bit, power)| bit * *power).sum()
         })
         .collect::<Vec<_>>();
 
