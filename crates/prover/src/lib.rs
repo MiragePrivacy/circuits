@@ -21,6 +21,8 @@ use ark_std::rand::SeedableRng;
 
 use mirage_relation::{Bounds, KeccacheckReceiptCircuit, ReceiptCircuit, Witness};
 
+#[cfg(feature = "export")]
+pub mod ceremony;
 pub mod streaming;
 
 /// A proving and verifying key pair for one circuit version.

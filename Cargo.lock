@@ -1957,6 +1957,7 @@ dependencies = [
  "num-bigint",
  "rayon",
  "taceo-groth16-sol",
+ "tiny-keccak",
 ]
 
 [[package]]
