@@ -30,7 +30,7 @@ the proof still verifies, the contract still pays, and nothing looks broken.
 | 2b | RLP, MPT, receipt relation | **done** — `crates/relation` |
 | 3 | Transaction parser + native dual-trie relation | **done** — `crates/gadgets/src/transaction`, `crates/relation/src/native.rs` |
 | 4 | Canonical escrow with embedded verifier | verifier exported and measured; escrow lives in the escrow repo |
-| 5 | Positive delayed-witness ancestry | **done** -- `crates/gadgets/src/ancestry.rs`, distance 8..=39; exported verifiers not yet regenerated |
+| 5 | Positive delayed-witness ancestry | **done** -- `crates/gadgets/src/ancestry.rs`, distance 8..=39; exported verifiers regenerated |
 
 Step 2's relation closes the whole binding chain:
 
