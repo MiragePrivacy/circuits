@@ -119,6 +119,29 @@ retain old keys until outstanding escrows have settled or refunded.
 
 ## Development checks
 
+The contribution walks sequential windows of `streaming::SGX_MSM_CHUNK` points,
+reusing the prover's 256K-point locality window. Workers multiply contiguous
+1024-point chunks and batch-normalize them with arkworks, bounding temporary
+projective storage instead of spreading work across the whole key.
+
+Socket reads and writes are bounded to 64 KiB. This avoids repeatedly copying a
+whole remaining key through Fortanix's untrusted I/O buffer on partial writes.
+The enclave serializes the final key directly through a buffered hashing writer;
+the manifest commits the exact bytes sent without retaining another full key
+buffer. Genesis remains hash-checked before parsing. Stage logs report elapsed
+time for diagnosis; they are not attested evidence or trusted timing.
+
+These choices preserve the key encoding and contribution equations. The prover's
+window size is a starting point, not a measured optimum for ceremony workloads.
+Benchmark the full ceremony on the target host before claiming a speedup.
+
+For ceremony-only fixes, copy the prepared `inputs.json` and `inputs/` into a
+new run directory and build with `--reuse-inputs`. The script verifies genesis
+hashes and rejects any source differences outside this crate and its build
+script. The original input revision stays in the manifest, and `build.json`
+records both input and enclave source revisions. Circuit or dependency changes
+require fresh preparation. Never overwrite an earlier run's build or outputs.
+
 ```sh
 nix develop -c cargo test -p mirage-sgx-ceremony --features host
 nix develop -c cargo clippy -p mirage-sgx-ceremony --features host --all-targets --no-deps -- -D warnings
@@ -126,5 +149,6 @@ nix develop -c cargo clippy -p mirage-sgx-ceremony --features host --all-targets
 
 Tests exercise a real small Groth16 circuit, independent contribution checks,
 invalid query updates, unchanged delta, wrong public signals, serialization
-trailing bytes, frame bounds, and input/output manifest binding. The non-SGX
+trailing bytes, partial I/O, streamed-key compatibility, locality-window
+boundaries, frame bounds, and input/output manifest binding. The non-SGX
 `ceremony-enclave` binary always exits unsuccessfully.

@@ -20,8 +20,9 @@ fn verify_evidence(
     let verified = dcap_qvl::verify::verify(quote, collateral, now()?)?;
     ensure!(
         verified.status == "UpToDate",
-        "TCB is not UpToDate: {}",
-        verified.status
+        "TCB is not UpToDate: {}; advisories: {:?}",
+        verified.status,
+        verified.advisory_ids
     );
     let report = verified.report.as_sgx().context("expected SGX quote")?;
     verify_identity(
@@ -56,7 +57,9 @@ fn verify_files(
     circuit: &Circuit,
     measurement: &str,
 ) -> Result<()> {
+    let started = std::time::Instant::now();
     let dir = root.join(&circuit.circuit);
+    eprintln!("{}: checking output hashes and quote", circuit.circuit);
     let manifest = fs::read(dir.join("output.json"))?;
     let pk = fs::read(dir.join("final.pk"))?;
     let vk = fs::read(dir.join("final.vk"))?;
@@ -64,6 +67,11 @@ fn verify_files(
     let quote = fs::read(dir.join("quote.bin"))?;
     let collateral = serde_json::from_slice(&fs::read(dir.join("collateral.json"))?)?;
     verify_evidence(&quote, &collateral, &manifest, measurement)?;
+    eprintln!(
+        "{}: quote accepted after {:.1}s; checking key update",
+        circuit.circuit,
+        started.elapsed().as_secs_f64()
+    );
     let genesis = fs::read(
         root.join("inputs")
             .join(&circuit.circuit)
@@ -82,6 +90,11 @@ fn verify_files(
         "VK does not match PK"
     );
     verify_update(&before, &after, &mut ark_std::rand::rngs::OsRng)?;
+    eprintln!(
+        "{}: key update checked after {:.1}s; generating fixture proof",
+        circuit.circuit,
+        started.elapsed().as_secs_f64()
+    );
     use taceo_groth16_sol::{askama::Template, SolidityVerifierConfig, SolidityVerifierContext};
     drop(before);
     let verifier = SolidityVerifierContext {

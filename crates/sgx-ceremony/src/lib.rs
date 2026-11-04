@@ -3,15 +3,17 @@ use ark_bn254::{Bn254, Fr, G1Projective};
 use ark_ec::{pairing::Pairing, AffineRepr, CurveGroup, VariableBaseMSM};
 use ark_ff::{Field, One, UniformRand, Zero};
 use ark_groth16::ProvingKey;
-use ark_serialize::{CanonicalDeserialize, Compress, Validate};
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress, Validate};
 use ark_std::rand::{CryptoRng, RngCore};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::io::{Read, Write};
+use std::io::{BufWriter, Read, Write};
 use zeroize::Zeroize;
 
 pub const MAX_KEY: usize = 2 << 30;
+const IO_CHUNK: usize = 64 << 10;
+const NORMALIZE_CHUNK: usize = 1024;
 pub const INPUTS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/inputs.json"));
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -63,15 +65,59 @@ pub fn read_frame(r: &mut impl Read, limit: usize) -> Result<Vec<u8>> {
     let len = usize::try_from(u64::from_be_bytes(len))?;
     ensure!(len <= limit, "frame exceeds limit");
     let mut bytes = vec![0; len];
-    r.read_exact(&mut bytes)?;
+    for chunk in bytes.chunks_mut(IO_CHUNK) {
+        r.read_exact(chunk)?;
+    }
     Ok(bytes)
 }
 
 pub fn write_frame(w: &mut impl Write, bytes: &[u8]) -> Result<()> {
     w.write_all(&(bytes.len() as u64).to_be_bytes())?;
-    w.write_all(bytes)?;
+    for chunk in bytes.chunks(IO_CHUNK) {
+        w.write_all(chunk)?;
+    }
     w.flush()?;
     Ok(())
+}
+
+/// Streams the canonical key and hashes exactly the bytes written.
+pub fn write_key_frame(w: &mut impl Write, key: &ProvingKey<Bn254>) -> Result<String> {
+    struct HashWriter<W> {
+        writer: W,
+        hash: Sha256,
+        remaining: usize,
+    }
+    impl<W: Write> Write for HashWriter<W> {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if bytes.len() > self.remaining {
+                return Err(std::io::Error::other("serialized key exceeds frame"));
+            }
+            let written = self.writer.write(&bytes[..bytes.len().min(IO_CHUNK)])?;
+            self.hash.update(&bytes[..written]);
+            self.remaining -= written;
+            Ok(written)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.writer.flush()
+        }
+    }
+    let len = key.serialized_size(Compress::No);
+    ensure!(len <= MAX_KEY, "frame exceeds limit");
+    w.write_all(&(len as u64).to_be_bytes())?;
+    let mut writer = BufWriter::with_capacity(
+        IO_CHUNK,
+        HashWriter {
+            writer: w,
+            hash: Sha256::new(),
+            remaining: len,
+        },
+    );
+    key.serialize_with_mode(&mut writer, Compress::No)?;
+    writer.flush()?;
+    let writer = writer.into_inner().map_err(|e| e.into_error())?;
+    ensure!(writer.remaining == 0, "serialized key shorter than frame");
+    Ok(hex::encode(writer.hash.finalize()))
 }
 
 pub fn read_key(bytes: &[u8]) -> Result<ProvingKey<Bn254>> {
@@ -99,13 +145,20 @@ pub fn contribute(key: &mut ProvingKey<Bn254>, rng: &mut (impl RngCore + CryptoR
     key.delta_g1 = (key.delta_g1 * delta).into_affine();
     key.vk.delta_g2 = (key.vk.delta_g2 * delta).into_affine();
     for points in [&mut key.h_query, &mut key.l_query] {
-        points
-            .par_iter_mut()
-            .for_each(|p| *p = (*p * inverse).into_affine());
+        scale_query(points, &inverse);
     }
     delta.zeroize();
     inverse.zeroize();
     Ok(())
+}
+
+fn scale_query(points: &mut [ark_bn254::G1Affine], scalar: &Fr) {
+    for window in points.chunks_mut(mirage_prover::streaming::SGX_MSM_CHUNK) {
+        window.par_chunks_mut(NORMALIZE_CHUNK).for_each(|chunk| {
+            let projective: Vec<_> = chunk.iter().map(|p| *p * scalar).collect();
+            chunk.copy_from_slice(&G1Projective::normalize_batch(&projective));
+        });
+    }
 }
 
 /// Independently checks the full key against the pinned genesis.
@@ -238,10 +291,73 @@ mod tests {
             assert!(verify_update(&before, &bad, &mut rng).is_err());
         }
         let bytes = mirage_prover::save_proving_key(&after, false).unwrap();
+        let mut frame = Vec::new();
+        assert_eq!(write_key_frame(&mut frame, &after).unwrap(), hash(&bytes));
+        assert_eq!(read_frame(&mut frame.as_slice(), MAX_KEY).unwrap(), bytes);
         read_key(&bytes).unwrap();
         let mut trailing = bytes;
         trailing.push(0);
         assert!(read_key(&trailing).is_err());
+    }
+
+    #[test]
+    fn locality_windows_match_pointwise_scaling() {
+        let mut points = vec![
+            ark_bn254::G1Affine::zero();
+            mirage_prover::streaming::SGX_MSM_CHUNK + NORMALIZE_CHUNK + 1
+        ];
+        for index in [
+            0,
+            NORMALIZE_CHUNK - 1,
+            NORMALIZE_CHUNK,
+            mirage_prover::streaming::SGX_MSM_CHUNK - 1,
+            mirage_prover::streaming::SGX_MSM_CHUNK,
+            points.len() - 1,
+        ] {
+            points[index] =
+                (ark_bn254::G1Affine::generator() * Fr::from(index as u64 + 1)).into_affine();
+        }
+        let scalar = Fr::from(19);
+        let expected: Vec<_> = points.iter().map(|p| (*p * scalar).into_affine()).collect();
+        scale_query(&mut points, &scalar);
+        assert_eq!(points, expected);
+    }
+
+    #[test]
+    fn bounded_transport_handles_partial_io() {
+        struct PartialIo(std::io::Cursor<Vec<u8>>);
+        impl Write for PartialIo {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                assert!(bytes.len() <= IO_CHUNK);
+                self.0.write(&bytes[..bytes.len().min(997)])
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl Read for PartialIo {
+            fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+                assert!(bytes.len() <= IO_CHUNK);
+                let len = bytes.len().min(991);
+                self.0.read(&mut bytes[..len])
+            }
+        }
+        let payload: Vec<_> = (0..IO_CHUNK * 3 + 7).map(|i| i as u8).collect();
+        let mut io = PartialIo(std::io::Cursor::new(Vec::new()));
+        write_frame(&mut io, &payload).unwrap();
+        io.0.set_position(0);
+        assert_eq!(read_frame(&mut io, MAX_KEY).unwrap(), payload);
+        let mut rng = StdRng::seed_from_u64(7);
+        let mut key = ark_groth16::Groth16::<Bn254>::generate_random_parameters_with_reduction(
+            Square, &mut rng,
+        )
+        .unwrap();
+        key.h_query = vec![ark_bn254::G1Affine::generator(); IO_CHUNK / 16];
+        let expected = mirage_prover::save_proving_key(&key, false).unwrap();
+        let mut io = PartialIo(std::io::Cursor::new(Vec::new()));
+        assert_eq!(write_key_frame(&mut io, &key).unwrap(), hash(&expected));
+        io.0.set_position(0);
+        assert_eq!(read_frame(&mut io, MAX_KEY).unwrap(), expected);
     }
 
     #[test]

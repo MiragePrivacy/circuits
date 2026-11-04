@@ -57,8 +57,19 @@ def build(args):
     rev = revision()
     out = args.directory.resolve()
     inputs = out / "inputs.json"
-    if json.loads(inputs.read_text())["source_revision"] != rev:
-        raise SystemExit("Source revision changed; prepare a new ceremony")
+    input_rev = json.loads(inputs.read_text())["source_revision"]
+    if input_rev != rev:
+        if not args.reuse_inputs:
+            raise SystemExit("Source revision changed; prepare new inputs or use --reuse-inputs for ceremony-only changes")
+        changed = run("git", "diff", "--name-only", input_rev, rev, capture_output=True, text=True).stdout.splitlines()
+        if any(not (path.startswith("crates/sgx-ceremony/") or path == "scripts/sgx-ceremony.py") for path in changed):
+            raise SystemExit("Changes outside ceremony code require fresh input preparation")
+    for circuit in json.loads(inputs.read_text())["circuits"]:
+        if circuit["circuit"] not in CIRCUITS:
+            raise SystemExit("Unknown circuit in input manifest")
+        key = out / "inputs" / circuit["circuit"] / "genesis.pk"
+        if key.stat().st_size != circuit["genesis_bytes"] or digest(key) != circuit["genesis_sha256"]:
+            raise SystemExit("Genesis does not match prepared inputs")
     build_dir = out / "build"
     build_dir.mkdir(exist_ok=False)
     env = dict(os.environ, CEREMONY_INPUTS=str(inputs), FORTANIX_SGX_LVI_MITIGATION="1", RUSTFLAGS="-C target-feature=+bmi2,+adx")
@@ -78,7 +89,7 @@ def build(args):
         raise SystemExit("Signature must prohibit DEBUG enclaves")
     measurement = sig[960:992].hex()
     (build_dir / "mrenclave.txt").write_text(measurement + "\n")
-    (build_dir / "build.json").write_text(json.dumps(dict(source_revision=rev, inputs_sha256=digest(inputs), image_sha256=digest(image), signature_sha256=digest(signature), mrenclave=measurement), indent=2) + "\n")
+    (build_dir / "build.json").write_text(json.dumps(dict(source_revision=rev, input_source_revision=input_rev, inputs_sha256=digest(inputs), image_sha256=digest(image), signature_sha256=digest(signature), mrenclave=measurement), indent=2) + "\n")
     run("nix", "develop", "-c", "cargo", "build", "--locked", "--release", "-p", "mirage-sgx-ceremony", "--features", "host", "--bin", "ceremony-host")
     print(f"Built {image}; expected MRENCLAVE {measurement}")
 
@@ -93,6 +104,7 @@ p.set_defaults(func=prepare)
 p = commands.add_parser("build")
 p.add_argument("directory", type=Path)
 p.add_argument("--signing-key", type=Path, required=True)
+p.add_argument("--reuse-inputs", action="store_true", help="Allow unchanged circuit inputs across ceremony-only source changes")
 p.set_defaults(func=build)
 args = parser.parse_args()
 args.func(args)
