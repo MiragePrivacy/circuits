@@ -11,6 +11,35 @@ fn now() -> Result<u64> {
     Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
 }
 
+const TCB_POLICY: &str = "beta-nomad-advisories-v1";
+
+fn verify_tcb_policy(
+    platform: dcap_qvl::tcb_info::TcbStatus,
+    qe: dcap_qvl::tcb_info::TcbStatus,
+    advisories: &[String],
+) -> Result<()> {
+    use dcap_qvl::tcb_info::TcbStatus;
+    for (name, status) in [("platform", platform), ("QE", qe)] {
+        ensure!(
+            matches!(
+                status,
+                TcbStatus::UpToDate
+                    | TcbStatus::SWHardeningNeeded
+                    | TcbStatus::ConfigurationNeeded
+                    | TcbStatus::ConfigurationAndSWHardeningNeeded
+            ),
+            "rejected {name} TCB status: {status}"
+        );
+    }
+    for advisory in advisories {
+        ensure!(
+            matches!(advisory.as_str(), "INTEL-SA-00289" | "INTEL-SA-00615"),
+            "advisory outside beta policy: {advisory}"
+        );
+    }
+    Ok(())
+}
+
 fn verify_evidence(
     quote: &[u8],
     collateral: &dcap_qvl::QuoteCollateralV3,
@@ -18,11 +47,14 @@ fn verify_evidence(
     measurement: &str,
 ) -> Result<()> {
     let verified = dcap_qvl::verify::verify(quote, collateral, now()?)?;
-    ensure!(
-        verified.status == "UpToDate",
-        "TCB is not UpToDate: {}; advisories: {:?}",
-        verified.status,
-        verified.advisory_ids
+    verify_tcb_policy(
+        verified.platform_status.status,
+        verified.qe_status.status,
+        &verified.advisory_ids,
+    )?;
+    eprintln!(
+        "TCB accepted under {TCB_POLICY}: {}; advisories: {:?}",
+        verified.status, verified.advisory_ids
     );
     let report = verified.report.as_sgx().context("expected SGX quote")?;
     verify_identity(
@@ -300,7 +332,7 @@ fn main() -> Result<()> {
     fs::write(
         root.join("verified.json"),
         serde_json::to_vec_pretty(
-            &serde_json::json!({"inputs_sha256": hash(&bytes), "mrenclave": args[3], "verified_at": now()?}),
+            &serde_json::json!({"inputs_sha256": hash(&bytes), "mrenclave": args[3], "verified_at": now()?, "tcb_policy": TCB_POLICY}),
         )?,
     )?;
     Ok(())
@@ -309,6 +341,29 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn beta_policy_rejects_stale_qe_platform_and_unknown_advisories() {
+        use dcap_qvl::tcb_info::TcbStatus::*;
+        for status in [
+            UpToDate,
+            ConfigurationNeeded,
+            SWHardeningNeeded,
+            ConfigurationAndSWHardeningNeeded,
+        ] {
+            verify_tcb_policy(
+                status,
+                UpToDate,
+                &["INTEL-SA-00289".into(), "INTEL-SA-00615".into()],
+            )
+            .unwrap();
+        }
+        for status in [OutOfDate, OutOfDateConfigurationNeeded, Revoked] {
+            assert!(verify_tcb_policy(status, UpToDate, &[]).is_err());
+            assert!(verify_tcb_policy(UpToDate, status, &[]).is_err());
+        }
+        assert!(verify_tcb_policy(UpToDate, UpToDate, &["INTEL-SA-UNKNOWN".into()]).is_err());
+    }
 
     #[test]
     fn quote_identity_rejects_debug_wrong_measurement_and_manifest() {

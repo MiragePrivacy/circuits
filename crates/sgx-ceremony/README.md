@@ -72,10 +72,14 @@ target/release/ceremony-host verify "$RUN" "$MEASUREMENT"
 ```
 
 Verification checks the DCAP signature chain and current collateral validity,
-requires `UpToDate` TCB status, rejects debug enclaves and other measurements,
-and compares REPORTDATA. There is deliberately no advisory override switch.
-Platforms reporting a non-UpToDate status require a reviewed policy change,
-not bypassing verification. The verifier then checks artifact hashes, parses
+rejects debug enclaves and other measurements, and compares REPORTDATA.
+The beta policy `beta-nomad-advisories-v1` follows Nomad's allowance for
+`INTEL-SA-00289` and `INTEL-SA-00615`. It accepts UpToDate, ConfigurationNeeded,
+SWHardeningNeeded, and ConfigurationAndSWHardeningNeeded for both platform and
+QE, while rejecting stale/revoked TCBs and every other advisory. There is no
+runtime advisory override. This is explicit beta acceptance of platform risks:
+LVI hardening does not remediate the voltage-control configuration in 00289.
+Verification receipts record the policy name. The verifier then checks artifact hashes, parses
 keys with point validation and exact EOF, checks every fixed section and batched
 H/L pairing relations against genesis, checks PK/VK agreement, and generates
 and self-verifies a full circuit fixture proof. It renders the existing Solidity
