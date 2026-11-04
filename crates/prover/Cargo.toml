@@ -59,7 +59,9 @@ taceo-groth16-sol = { version = "0.4.2", optional = true }
 default = ["export", "parallel"]
 # The binaries: Solidity rendering, trace printing, hex reporting. Off for an
 # enclave build, which needs only the proving path.
+ceremony = ["dep:tiny-keccak"]
 export = [
+    "ceremony",
     "dep:mirage-encoding",
     "dep:taceo-groth16-sol",
     "dep:hex",

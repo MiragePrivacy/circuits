@@ -1,0 +1,48 @@
+[package]
+name = "mirage-sgx-ceremony"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ceremony-enclave"
+path = "src/bin/enclave.rs"
+
+[[bin]]
+name = "ceremony-host"
+path = "src/bin/host.rs"
+required-features = ["host"]
+
+[features]
+host = ["dep:aesm-client", "dep:enclave-runner", "dep:enclave-runner-sgx", "dep:sgxs-loaders", "dep:dcap-qvl", "dep:tokio", "dep:taceo-groth16-sol"]
+
+[dependencies]
+mirage-relation = { path = "../relation" }
+mirage-prover = { path = "../prover", default-features = false, features = ["ceremony", "parallel"] }
+ark-bn254.workspace = true
+ark-ec.workspace = true
+ark-ff.workspace = true
+ark-groth16.workspace = true
+ark-serialize.workspace = true
+ark-std.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+hex.workspace = true
+sha2 = "0.10"
+zeroize = "1"
+sgx-isa = "0.5"
+rayon = "1"
+rand = { version = "0.8", features = ["getrandom"] }
+anyhow = "1"
+
+[target.'cfg(not(target_env = "sgx"))'.dependencies]
+aesm-client = { version = "0.6", features = ["sgxs"], optional = true }
+enclave-runner = { version = "0.8", optional = true }
+enclave-runner-sgx = { version = "0.1.3", optional = true }
+sgxs-loaders = { version = "0.5", optional = true }
+dcap-qvl = { version = "0.4.1", default-features = false, features = ["std", "report", "ring", "default-x509"], optional = true }
+tokio = { version = "1", features = ["rt-multi-thread"], optional = true }
+taceo-groth16-sol = { version = "0.4.2", optional = true }
+
+[dev-dependencies]
+ark-relations.workspace = true

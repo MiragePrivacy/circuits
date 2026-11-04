@@ -21,7 +21,7 @@ use ark_std::rand::SeedableRng;
 
 use mirage_relation::{Bounds, KeccacheckReceiptCircuit, ReceiptCircuit, Witness};
 
-#[cfg(feature = "export")]
+#[cfg(feature = "ceremony")]
 pub mod ceremony;
 pub mod streaming;
 

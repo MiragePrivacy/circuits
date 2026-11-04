@@ -499,3 +499,9 @@ debug). Run it after touching the padding or state-selection logic.
 Every gadget test checks against `mirage-encoding`'s native implementation
 rather than against itself, and the negative tests matter most: a gadget that
 only passes on valid inputs proves nothing.
+
+## Beta SGX ceremony
+
+The [standalone SGX ceremony](crates/sgx-ceremony/README.md) derives fresh
+Phase 2 keys from public Phase 1 genesis, binds them to an SGX quote, and
+provides a prepare/build/run/verify flow to repeat after circuit updates.
