@@ -8,7 +8,8 @@ from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parent.parent
-PTAU21 = "9aef0573cef4ded9c4a75f148709056bf989f80dad96876aadeb6f1c6d062391f07a394a9e756d16f7eb233198d5b69407cca44594c763ab4a5b67ae73254678"
+PTAU = {21: "9aef0573cef4ded9c4a75f148709056bf989f80dad96876aadeb6f1c6d062391f07a394a9e756d16f7eb233198d5b69407cca44594c763ab4a5b67ae73254678",
+        22: "0d64f63dba1a6f11139df765cb690da69d9b2f469a1ddd0de5e4aa628abb28f787f04c6a5fb84a235ec5ea7f41d0548746653ecab0559add658a83502d1cb21b"}
 CIRCUITS = ("native-keccacheck", "erc20-keccacheck")
 
 
@@ -32,8 +33,9 @@ def prepare(args):
     if not args.id.strip():
         raise SystemExit("A nonempty ceremony ID is required")
     ptau = args.ptau.resolve()
-    if digest(ptau, "blake2b") != PTAU21:
-        raise SystemExit("Expected published Hermez powersOfTau28_hez_final_21.ptau")
+    ptau_hash = digest(ptau, "blake2b")
+    if ptau_hash not in PTAU.values():
+        raise SystemExit("Expected a published Hermez power-21 or power-22 transcript")
     out = args.directory.resolve()
     out.mkdir(parents=True, exist_ok=False)
     env = dict(os.environ, CEREMONY_SOURCE_REV=rev)
@@ -47,7 +49,7 @@ def prepare(args):
         if key.stat().st_size > 2 << 30:
             raise SystemExit("Genesis exceeds the enclave transport limit")
         records.append(dict(circuit=circuit, r1cs_digest=metadata["r1cs_digest"], genesis_sha256=digest(key), genesis_bytes=key.stat().st_size))
-    manifest = dict(version=1, ceremony_id=args.id, source_revision=rev, ptau_blake2b=PTAU21, circuits=records)
+    manifest = dict(version=1, ceremony_id=args.id, source_revision=rev, ptau_blake2b=ptau_hash, circuits=records)
     (out / "inputs.json").write_text(json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n")
 
 

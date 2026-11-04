@@ -21,15 +21,15 @@ From the circuits repository:
 ```sh
 nix develop
 python3 scripts/sgx-ceremony.py prepare /absolute/path/beta-v1 \
-  /absolute/path/powersOfTau28_hez_final_21.ptau --id beta-v1
+  /absolute/path/powersOfTau28_hez_final_22.ptau --id beta-v1
 python3 scripts/sgx-ceremony.py build /absolute/path/beta-v1 \
   --signing-key /absolute/path/ceremony-signing-key.pem
 ```
 
-Preparation checks the published BLAKE2b-512 hash of the power-21 transcript
+Preparation checks the published BLAKE2b-512 hash of the power-21 or power-22 transcript
 (the same hash pinned in the ceremony repository), runs the existing `ceremony
 export` for both current relations, and records their R1CS digests and exact
-uncompressed genesis hashes. If the circuit outgrows power 21, export fails;
+uncompressed genesis hashes. The current native circuit requires power 22. If a circuit outgrows the selected transcript, export fails;
 review and pin a larger published transcript before proceeding. Preparation is
 expensive: it synthesizes both complete circuits and derives both genesis keys.
 
