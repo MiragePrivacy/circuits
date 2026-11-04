@@ -99,6 +99,13 @@ those randomized proofs are not committed by the quote. Verifier source is
 verified by regeneration from the attested VK. Publish inputs, both genesis
 keys, build records, and both complete output directories together.
 
+After an interruption, `ceremony-host resume ROOT MRENCLAVE IMAGE SIG` verifies
+every existing circuit output before proceeding with missing circuit directories.
+Incomplete or invalid existing outputs fail closed and are never overwritten;
+use a fresh directory for those runs. Keep the original inputs and expected
+measurement when resuming. The completion receipt is written only after both
+circuits verify, including fresh fixture proofs.
+
 Collateral expires. Verification uses current time and fails closed when it
 expires; obtain fresh authentic collateral for the original quote to reverify.
 The stored verification timestamp is not a trusted historical timestamp. This

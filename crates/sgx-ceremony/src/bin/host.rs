@@ -281,7 +281,7 @@ fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().collect();
     ensure!(
         args.len() >= 4,
-        "usage: ceremony-host run ROOT MRENCLAVE IMAGE SIG | verify ROOT MRENCLAVE"
+        "usage: ceremony-host run|resume ROOT MRENCLAVE IMAGE SIG | verify ROOT MRENCLAVE"
     );
     ensure!(
         hex::decode(&args[3])?.len() == 32,
@@ -313,16 +313,20 @@ fn main() -> Result<()> {
     );
     for circuit in &inputs.circuits {
         match args[1].as_str() {
-            "run" => {
-                ensure!(args.len() == 6, "run requires IMAGE SIG");
-                run(
-                    root,
-                    &bytes,
-                    circuit,
-                    Path::new(&args[4]),
-                    Path::new(&args[5]),
-                    &args[3],
-                )?;
+            "run" | "resume" => {
+                ensure!(args.len() == 6, "run/resume requires IMAGE SIG");
+                if args[1] == "resume" && root.join(&circuit.circuit).exists() {
+                    verify_files(root, &bytes, circuit, &args[3])?;
+                } else {
+                    run(
+                        root,
+                        &bytes,
+                        circuit,
+                        Path::new(&args[4]),
+                        Path::new(&args[5]),
+                        &args[3],
+                    )?;
+                }
             }
             "verify" => verify_files(root, &bytes, circuit, &args[3])?,
             _ => bail!("unknown command"),
