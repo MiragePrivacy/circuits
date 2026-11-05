@@ -22,7 +22,7 @@
 //! collide with the ERC-20 one in the same compilation unit. It is renamed here
 //! rather than in the escrow repo so the vendored copy needs no hand editing.
 
-use std::path::PathBuf;
+mod export_common;
 
 use ark_bn254::Bn254;
 use ark_groth16::VerifyingKey;
@@ -33,7 +33,7 @@ use mirage_relation::native::{fixture, NativeBounds, NativeWitness};
 fn main() {
     // CARGO_MANIFEST_DIR is `crates/prover`, so reaching the repo's
     // `contracts/` takes two levels up, not one.
-    let out = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../contracts");
+    let out = export_common::output_dir();
     std::fs::create_dir_all(&out).expect("create contracts/");
 
     let bounds = NativeBounds::default();
@@ -68,7 +68,8 @@ fn main() {
     // soundly. The verifier rendered below is structurally identical either
     // way, so size and gas measurements hold; only the key's provenance differs.
     eprintln!("setup (native Keccacheck)...");
-    let keys = mirage_prover::native::setup_keccacheck(bounds, 0).expect("setup");
+    let keys = export_common::ceremony_keys()
+        .unwrap_or_else(|| mirage_prover::native::setup_keccacheck(bounds, 0).expect("setup"));
 
     eprintln!("rendering verifier...");
     let contract = render(&keys.vk);

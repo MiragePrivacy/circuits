@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "name": "beta-sgx-20261104-63a107c",
+  "visibility": "private",
+  "inputs_sha256": "7f744c967174ee5659a83463a32bcd9314cc258a37a3ed1eec2fba03d68fdd4e",
+  "mrenclave": "9233fd003eb9cb9e5e815727c7954bff56ae82154597c77d2b971de0d0b0664c",
+  "tcb_policy": "beta-nomad-advisories-v1",
+  "host_source_revision": "0f1ce8771ea1825b852e1b5068344e92f80e5a01",
+  "build": {
+    "source_revision": "63a107c54b3082dc3fd80cc7cdbb9698104644d7",
+    "input_source_revision": "09ad94c5b4db06c00e2bbbcffec7a7eb907d7060",
+    "inputs_sha256": "7f744c967174ee5659a83463a32bcd9314cc258a37a3ed1eec2fba03d68fdd4e",
+    "image_sha256": "9233fd003eb9cb9e5e815727c7954bff56ae82154597c77d2b971de0d0b0664c",
+    "signature_sha256": "8204b0d06bfe3118c5c40e791a9203aac700316938c25ca16a7f8f9b8f85ca65",
+    "mrenclave": "9233fd003eb9cb9e5e815727c7954bff56ae82154597c77d2b971de0d0b0664c"
+  },
+  "circuits": [
+    {
+      "version": 1,
+      "mode": "beta-tee",
+      "inputs_sha256": "7f744c967174ee5659a83463a32bcd9314cc258a37a3ed1eec2fba03d68fdd4e",
+      "circuit": "native-keccacheck",
+      "proving_key_sha256": "966d91b6e900d99b74aad31f9e34cee9589e71558a59fc0501d2b2e741c88d5c",
+      "verifying_key_sha256": "16433c4b97d1e9370c6af8936b6ae8f5364c7f7a3225365a0d3daea77f3eeb55"
+    },
+    {
+      "version": 1,
+      "mode": "beta-tee",
+      "inputs_sha256": "7f744c967174ee5659a83463a32bcd9314cc258a37a3ed1eec2fba03d68fdd4e",
+      "circuit": "erc20-keccacheck",
+      "proving_key_sha256": "57dd248a5973e544cd68865edccda860d78576346c0e3c8d44d6bfb59e1f5537",
+      "verifying_key_sha256": "fcfd86e575ea31c0b8d712bde80472a69d3db2eacbb763d0e6417ddfc861c0cb"
+    }
+  ]
+}

@@ -19,7 +19,7 @@
 //! produces the actual contract for the actual verification key, so the size
 //! can be compiled and measured rather than inherited.
 
-use std::path::PathBuf;
+mod export_common;
 
 use ark_bn254::Bn254;
 use ark_groth16::VerifyingKey;
@@ -31,7 +31,7 @@ fn main() {
     // CARGO_MANIFEST_DIR is `crates/prover`, so reaching the repo's
 
     // `contracts/` takes two levels up, not one.
-    let out = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../contracts");
+    let out = export_common::output_dir();
     std::fs::create_dir_all(&out).expect("create contracts/");
 
     let bounds = Bounds::default();
@@ -76,7 +76,10 @@ fn main() {
     // rendered below is structurally identical either way, so the size and gas
     // measurements hold; only the key's provenance differs.
     eprintln!("setup...");
-    let keys = if keccachecheck {
+    let keys = if let Some(keys) = export_common::ceremony_keys() {
+        assert!(keccachecheck, "ceremony keys require Keccacheck");
+        keys
+    } else if keccachecheck {
         mirage_prover::setup_keccacheck(bounds, 0).expect("Keccacheck setup")
     } else {
         mirage_prover::setup(bounds, 0).expect("setup")

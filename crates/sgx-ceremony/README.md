@@ -163,3 +163,28 @@ invalid query updates, unchanged delta, wrong public signals, serialization
 trailing bytes, partial I/O, streamed-key compatibility, locality-window
 boundaries, frame bounds, and input/output manifest binding. The non-SGX
 `ceremony-enclave` binary always exits unsuccessfully.
+
+## Private beta release
+
+`releases/beta-20261104.json` records the verified keys, enclave measurement,
+build provenance and accepted beta TCB policy. The full evidence and keys remain
+private in `ceremony-runs/beta-sgx-20261104-63a107c` and the corresponding sgx1
+`~/ceremony/runs` directory. This is a beta TEE contribution, not a completed
+public Phase 2 ceremony.
+
+After verifying the run, export escrow fixtures with its existing keys:
+
+```sh
+export MIRAGE_EXPORT_DIR=/path/to/exported-contracts
+MIRAGE_EXPORT_PROVING_KEY=/path/to/run/native-keccacheck/final.pk \
+  cargo run --release -p mirage-prover --bin export-native-verifier
+MIRAGE_EXPORT_PROVING_KEY=/path/to/run/erc20-keccacheck/final.pk \
+  cargo run --release -p mirage-prover --bin export-verifier -- --keccachecheck
+MIRAGE_EXPORT_PROVING_KEY=/path/to/run/erc20-keccacheck/final.pk \
+  cargo run --release -p mirage-prover --bin export-verifier -- --keccachecheck --batch-row
+```
+
+Use `--gas-sim` for API gas simulation fixtures, in a separate output directory.
+The exporters validate the supplied key and verify each generated proof. Without
+`MIRAGE_EXPORT_PROVING_KEY`, they retain the seeded development setup; those
+outputs must not replace the beta verifiers.
