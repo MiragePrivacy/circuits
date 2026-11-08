@@ -141,6 +141,9 @@ impl Default for SpongeVar {
 }
 
 #[cfg(test)]
+mod params_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use ark_r1cs_std::{GR1CSVar, alloc::AllocVar};

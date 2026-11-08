@@ -6,9 +6,9 @@ use crate::poseidon2::SpongeVar;
 use ark_bn254::Fr;
 use ark_bn254_05::Fr as Fr05;
 use ark_ff::{AdditiveGroup, MontFp, One, Zero};
-use ark_r1cs_std::{alloc::AllocVar, boolean::Boolean, eq::EqGadget, fields::fp::FpVar};
+use ark_r1cs_std::{GR1CSVar, alloc::AllocVar, boolean::Boolean, eq::EqGadget, fields::fp::FpVar};
 use ark_relations::gr1cs::{ConstraintSystemRef, SynthesisError};
-use std::str::FromStr;
+use std::{ops::Range, str::FromStr};
 
 const HALF: Fr =
     MontFp!("10944121435919637611123202872628637544274182200208017171849102093287904247809");
@@ -98,11 +98,30 @@ fn xor(a: &FpVar<Fr>, b: &FpVar<Fr>) -> FpVar<Fr> {
     a + b - &ab - &ab
 }
 
-fn enforce_named(_label: &str, left: &FpVar<Fr>, right: &FpVar<Fr>) -> Result<(), SynthesisError> {
-    left.enforce_equal(right)
+/// Enforces `left == right` and logs the constraint rows under `label`.
+///
+/// The log is side data: it adds no variables or constraints.
+fn enforce_named(
+    checks: &mut Vec<NamedCheck>,
+    label: &str,
+    left: &FpVar<Fr>,
+    right: &FpVar<Fr>,
+) -> Result<(), SynthesisError> {
+    #[cfg(test)]
+    if crate::testkit::hooks::check_removed(label) {
+        return Ok(());
+    }
+    let cs = left.cs().or(right.cs());
+    let start = cs.num_constraints();
+    left.enforce_equal(right)?;
+    checks.push(NamedCheck {
+        label: label.to_owned(),
+        rows: start..cs.num_constraints(),
+    });
+    Ok(())
 }
 
-fn eval_eq(r: &[FpVar<Fr>]) -> Vec<FpVar<Fr>> {
+pub(crate) fn eval_eq(r: &[FpVar<Fr>]) -> Vec<FpVar<Fr>> {
     if r.is_empty() {
         return vec![FpVar::Constant(Fr::one())];
     }
@@ -121,7 +140,7 @@ fn eval_eq(r: &[FpVar<Fr>]) -> Vec<FpVar<Fr>> {
     out
 }
 
-fn eval_mle_with_eq(mle: &[FpVar<Fr>], eq: &[FpVar<Fr>]) -> FpVar<Fr> {
+pub(crate) fn eval_mle_with_eq(mle: &[FpVar<Fr>], eq: &[FpVar<Fr>]) -> FpVar<Fr> {
     assert_eq!(mle.len(), eq.len());
     // One flat sum: a running fold leaves a chain of partial sums that LC
     // inlining expands quadratically in the table size.
@@ -178,7 +197,13 @@ fn verify_sumcheck<const DEGREE: usize>(
     mut claim: FpVar<Fr>,
 ) -> Result<(FpVar<Fr>, Vec<FpVar<Fr>>), SynthesisError> {
     let mut challenges = Vec::with_capacity(num_vars);
-    for _ in 0..num_vars {
+    #[cfg(test)]
+    let sumcheck = crate::testkit::hooks::next_sumcheck();
+    for _round in 0..num_vars {
+        #[cfg(test)]
+        if let Some(value) = crate::testkit::hooks::rebased_claim(sumcheck, _round) {
+            claim = FpVar::new_witness(claim.cs(), || Ok(value))?;
+        }
         let mut p = Vec::with_capacity(DEGREE);
         for _ in 0..DEGREE {
             p.push(transcript.read()?);
@@ -217,6 +242,7 @@ fn strip_pi(pi: &[FpVar<Fr>]) -> Vec<FpVar<Fr>> {
 
 fn verify_round(
     transcript: &mut TranscriptVar,
+    checks: &mut Vec<NamedCheck>,
     num_vars: usize,
     alpha: &[FpVar<Fr>],
     beta: &mut [FpVar<Fr>],
@@ -233,7 +259,7 @@ fn verify_round(
         .collect::<Vec<_>>();
     let e_rc = eval_mle(&rc_bits, &vrs_iota[num_vars - 6..]);
     let expected = e_eq * (&beta[0] * xor(&chi_00, &e_rc) + &chi_rlc);
-    enforce_named(&format!("round {round}: iota"), &expected, &ve)?;
+    enforce_named(checks, &format!("round {round}: iota"), &expected, &ve)?;
 
     let x = transcript.generate();
     let y = transcript.generate();
@@ -257,7 +283,7 @@ fn verify_round(
         );
         checksum += &e_eq * &beta[i] * chi;
     }
-    enforce_named(&format!("round {round}: chi"), &checksum, &ve)?;
+    enforce_named(checks, &format!("round {round}: chi"), &checksum, &ve)?;
 
     let rho = strip_pi(&pi);
     let mut expected_sum = FpVar::Constant(Fr::zero());
@@ -279,7 +305,7 @@ fn verify_round(
         let rotation = rot_from_eq(i, &eq_chi_suffix, &eq_rho_suffix, &prefix_value);
         checksum += &beta[i] * rotation * &theta[i];
     }
-    enforce_named(&format!("round {round}: rho"), &checksum, &ve)?;
+    enforce_named(checks, &format!("round {round}: rho"), &checksum, &ve)?;
 
     let theta_xor_base = theta
         .iter()
@@ -305,7 +331,7 @@ fn verify_round(
     for j in 0..5 {
         checksum += &e_eq * &d[j] * &ai[j];
     }
-    enforce_named(&format!("round {round}: theta"), &checksum, &ve)?;
+    enforce_named(checks, &format!("round {round}: theta"), &checksum, &ve)?;
 
     expected_sum = FpVar::Constant(Fr::zero());
     let mut beta_d = Vec::with_capacity(5);
@@ -328,7 +354,7 @@ fn verify_round(
     for j in 0..5 {
         checksum += &beta_d[j] * &e_eq * &c[(j + 4) % 5] * &rot_c[(j + 1) % 5];
     }
-    enforce_named(&format!("round {round}: theta_d"), &checksum, &ve)?;
+    enforce_named(checks, &format!("round {round}: theta_d"), &checksum, &ve)?;
 
     expected_sum = FpVar::Constant(Fr::zero());
     let mut beta_c = Vec::with_capacity(5);
@@ -358,7 +384,7 @@ fn verify_round(
         let product = (0..5).fold(FpVar::Constant(Fr::one()), |acc, i| acc * &a[i * 5 + j]);
         checksum += (&beta_c[j] * &e_eq + &beta_rot_c[j] * &e_rot) * product;
     }
-    enforce_named(&format!("round {round}: theta_c"), &checksum, &ve)?;
+    enforce_named(checks, &format!("round {round}: theta_c"), &checksum, &ve)?;
 
     expected_sum = FpVar::Constant(Fr::zero());
     for (i, value) in ai.iter().enumerate() {
@@ -385,7 +411,7 @@ fn verify_round(
     for j in 0..25 {
         checksum += &beta[j] * &e_eq_ai * &iota[j] + &beta_a[j] * &e_eq_a * &iota[j];
     }
-    enforce_named(&format!("round {round}: theta_a"), &checksum, &ve)?;
+    enforce_named(checks, &format!("round {round}: theta_a"), &checksum, &ve)?;
     for value in &mut iota {
         *value = (FpVar::Constant(Fr::one()) - &*value) * HALF;
     }
@@ -395,8 +421,9 @@ fn verify_round(
 /// Smallest batch accepted by the verifier.
 ///
 /// A singleton batch derives no output challenge, so the transcript would
-/// absorb nothing about the claimed states before `beta` is squeezed.
-pub const MIN_INSTANCES: usize = 2;
+/// absorb nothing about the claimed states before `beta` is squeezed. Two
+/// instances derive a single-element `r`, whose collisions are reachable.
+pub const MIN_INSTANCES: usize = 4;
 
 /// Words packed into each absorbed field element; 192 bits fit injectively.
 const WORDS_PER_ELEMENT: usize = 3;
@@ -408,7 +435,10 @@ const STATEMENT_TAG: u128 = u128::from_le_bytes(*b"mirage/kcck/stmt");
 /// Both slices are lane-major (`[lane][instance]`). Absorbing the inputs as
 /// well as the outputs binds every later challenge to the whole statement.
 pub fn derive_r_native(input: &[u64], output: &[u64], log_instances: usize) -> Vec<Fr05> {
-    assert!(log_instances > 0, "Keccacheck needs at least two instances");
+    assert!(
+        1 << log_instances >= MIN_INSTANCES,
+        "Keccacheck batch below MIN_INSTANCES"
+    );
     let word = Fr05::from(1u128 << 64);
     let mut sponge = gkr::transcript::Sponge::new();
     sponge.absorb(Fr05::from(STATEMENT_TAG));
@@ -425,12 +455,15 @@ pub fn derive_r_native(input: &[u64], output: &[u64], log_instances: usize) -> V
     (0..log_instances).map(|_| sponge.squeeze()).collect()
 }
 
-fn derive_r_var(
+pub(crate) fn derive_r_var(
     input_bits: &[FpVar<Fr>],
     output_bits: &[FpVar<Fr>],
     log_instances: usize,
 ) -> Vec<FpVar<Fr>> {
-    assert!(log_instances > 0, "Keccacheck needs at least two instances");
+    assert!(
+        1 << log_instances >= MIN_INSTANCES,
+        "Keccacheck batch below MIN_INSTANCES"
+    );
     let mut sponge = SpongeVar::new();
     sponge.absorb(&FpVar::Constant(Fr::from(STATEMENT_TAG)));
     sponge.absorb(&FpVar::Constant(Fr::from(1u64 << log_instances)));
@@ -458,6 +491,13 @@ pub struct Witness {
     pub output: Vec<u64>,
 }
 
+/// One named verifier equality and the constraint rows it produced.
+#[derive(Clone, Debug)]
+pub struct NamedCheck {
+    pub label: String,
+    pub rows: Range<usize>,
+}
+
 #[derive(Clone, Debug)]
 pub struct VerificationProfile {
     pub allocation: usize,
@@ -466,6 +506,7 @@ pub struct VerificationProfile {
     pub rounds: usize,
     pub input_binding: usize,
     pub total: usize,
+    pub checks: Vec<NamedCheck>,
 }
 
 pub fn verify_witness(
@@ -558,6 +599,9 @@ fn verify_allocated(
     start: usize,
     after_allocation: usize,
 ) -> Result<VerificationProfile, SynthesisError> {
+    #[cfg(test)]
+    crate::testkit::hooks::reset_sumchecks();
+    let mut checks = Vec::new();
     let log_instances = instances.ilog2() as usize;
     let num_vars = log_instances + 6;
     let input_bits = input_booleans
@@ -592,11 +636,12 @@ fn verify_allocated(
             &beta[i] * eval_mle_with_eq(&output[i * instances..(i + 1) * instances], &eq_r);
     }
     let mut sum = transcript.read()?;
-    enforce_named("output sum", &sum, &expected_sum)?;
+    enforce_named(&mut checks, "output sum", &sum, &expected_sum)?;
 
     let (claim, r_x) = verify_sumcheck::<2>(&mut transcript, log_instances, sum)?;
     let words_r_x = transcript.read()?;
     enforce_named(
+        &mut checks,
         "output word reduction",
         &claim,
         &(&words_r_x * eq(&r, &r_x)),
@@ -608,6 +653,7 @@ fn verify_allocated(
         .map(|i| FpVar::Constant(Fr::from(1u64 << i)))
         .collect::<Vec<_>>();
     enforce_named(
+        &mut checks,
         "output bit reduction",
         &claim,
         &(eval_mle(&powers, &r_y) * &bit_eval),
@@ -621,6 +667,7 @@ fn verify_allocated(
     for round in (0..24).rev() {
         (alpha, iota) = verify_round(
             &mut transcript,
+            &mut checks,
             num_vars,
             &alpha,
             &mut beta,
@@ -643,6 +690,7 @@ fn verify_allocated(
         let start = i * instances * 64;
         let end = start + instances * 64;
         enforce_named(
+            &mut checks,
             &format!("input lane {i}"),
             &eval_mle_with_eq(&input_bits[start..end], &eq_alpha),
             iota_value,
@@ -657,6 +705,7 @@ fn verify_allocated(
         rounds: after_rounds - after_output_reduction,
         input_binding: total - after_rounds,
         total: total - start,
+        checks,
     })
 }
 
@@ -796,7 +845,7 @@ mod tests {
 
     #[test]
     fn proof_length_formula_matches_native_prover() {
-        for instances in [2, 4, 8, 16, 32, 64, 128] {
+        for instances in [4, 8, 16, 32, 64, 128] {
             assert_eq!(
                 make_witness(instances).proof.len(),
                 proof_elements(instances)

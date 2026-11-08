@@ -116,13 +116,13 @@ fn state_words(state: &State<Fr>) -> Option<[u64; 25]> {
     Some(words)
 }
 
-fn constant_state(words: &[u64; 25]) -> State<Fr> {
+pub(crate) fn constant_state(words: &[u64; 25]) -> State<Fr> {
     core::array::from_fn(|lane| {
         core::array::from_fn(|bit| Boolean::constant((words[lane] >> bit) & 1 == 1))
     })
 }
 
-fn transpose_states(states: &[State<Fr>]) -> Vec<Boolean<Fr>> {
+pub(crate) fn transpose_states(states: &[State<Fr>]) -> Vec<Boolean<Fr>> {
     let mut bits = Vec::with_capacity(states.len() * 25 * 64);
     for lane in 0..25 {
         for state in states {
