@@ -90,8 +90,12 @@ commit and were not re-measured; the delta is 0.04% of the relation.
   amount, a commitment from another context, a native-asset opening, a block
   number outside the statement, both lease-window boundaries, and a tampered
   receipt byte.
-- A one-permutation batch, whose zero-round sumcheck is a distinct code path,
-  verifies a genuine permutation and rejects a flipped output bit.
+- A one-permutation batch is padded to `MIN_INSTANCES` (now 4), verifies a
+  genuine permutation and rejects a flipped output or input bit.
+- Soundness tests (`src/soundness.rs`, `tests/forgery_batch.rs`) show each
+  named check is enforced and necessary against a cheating prover, and
+  `crates/prover/tests/keccacheck_identity.rs` pins both production digests to
+  the beta ceremony.
 - The deepest fixture in the 100-case mainnet dataset satisfies the batched
   circuit as a fast real-data integration gate.
 - All tests use the reference's corrected late-round Keccak constants.
@@ -103,10 +107,9 @@ The integration now has an alternate `KeccacheckReceiptCircuit` and Rust
 
 1. Run the remaining mainnet-fixture suite through the batched circuit. The
    mutation suite now runs there (`batched_keccacheck_rejects_every_direct_mutation`).
-2. Obtain cryptographic sign-off on the Poseidon-derived output challenge and
-   the absent transcript domain separation. Reviewed adversarially and no
-   exploitable gap was found; see "Open security items" below for what a
-   reviewer still needs to confirm.
+2. Obtain external sign-off on the soundness analysis in
+   [`docs/keccacheck-soundness/`](../../docs/keccacheck-soundness/00-summary.md),
+   chiefly the Poseidon2 instance and the two-sponge Fiat-Shamir proof.
 3. Vendor or migrate the upstream Rust GKR prover to arkworks 0.6, removing the
    temporary dual-version scalar conversion.
 4. Investigate the arkworks overhead relative to gnark, principally
@@ -151,24 +154,14 @@ fixable in this crate.
 
 ### Needs cryptographic sign-off
 
-The output challenge `r` is derived in-circuit with Poseidon2 over the claimed
-output words, replacing gnark's Groth16 commitment API. Transcript ordering was
-checked and is correct: outputs are absorbed before `r` is squeezed, `r` is
-absorbed before `beta`, and every proof value is absorbed before the challenge
-that tests it. The residual difference from upstream is that a
-commitment-derived challenge also binds the witness commitment, whereas this
-binds only the output words.
-
-`derive_r_var` and the main transcript are separate sponge instances started
-from the same `INITIAL_STATE`, with no domain separation tag. Their absorb
-sequences differ, so no collision is reachable, and upstream has no tag either.
-Adding one would fork the transcript from the pinned native prover at
-`15f00e3`, so it is a protocol change rather than a local fix.
-
-The singleton batch is a distinct code path: with one permutation
-`log_instances` is zero, the first sumcheck runs zero rounds, and the output
-claim reduces to a transcript-derived linear combination of the output words.
-`batch::tests` now covers it in both directions.
+Superseded. The earlier text here said the output challenge binds only the
+output words and that no exploitable gap remained; a singleton forgery was
+later found and fixed in `b7484ee`, which also absorbs the input states. The
+current analysis, with proofs, reviews and open items, is in
+[`docs/keccacheck-soundness/00-summary.md`](../../docs/keccacheck-soundness/00-summary.md).
+In brief: the interactive protocol and the ideal-permutation Fiat-Shamir step
+are proved and independently refereed; the Poseidon2 instance remains an
+analysed assumption. Batches below `MIN_INSTANCES = 4` are refused.
 
 ### Carried by out-of-circuit policy
 
