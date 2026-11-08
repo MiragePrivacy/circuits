@@ -81,3 +81,5 @@ parallel = [
 
 [dev-dependencies]
 ark-r1cs-std.workspace = true
+mirage-gadgets = { path = "../gadgets" }
+mirage-keccacheck-arkworks = { path = "../../experiments/keccacheck-arkworks" }

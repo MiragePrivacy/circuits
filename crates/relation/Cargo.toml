@@ -18,3 +18,6 @@ mirage-keccacheck-arkworks = { path = "../../experiments/keccacheck-arkworks" }
 serde.workspace = true
 serde_json.workspace = true
 hex.workspace = true
+gkr = { git = "https://github.com/reilabs/keccacheck.git", rev = "15f00e3da5622f1c7155b02d1f9c00bd2416c282", default-features = false }
+ark-bn254-05 = { package = "ark-bn254", version = "0.5", features = ["std"] }
+keccak = "0.1.5"
