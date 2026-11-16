@@ -125,11 +125,9 @@ pub fn stage_map<V: MptVerifier<Fr>>(p: &NativeProof) -> Vec<(String, usize)> {
 
     let root = alloc_bounded(cs.clone(), &p.root, 32).unwrap();
     let key = alloc_bounded(cs.clone(), &p.key, TEST_KEY_BYTES).unwrap();
-    let key_len =
-        FpVar::new_witness(cs.clone(), || Ok(Fr::from(p.key.len() as u64))).unwrap();
+    let key_len = FpVar::new_witness(cs.clone(), || Ok(Fr::from(p.key.len() as u64))).unwrap();
     let value = alloc_bounded(cs.clone(), &p.value, value_bound()).unwrap();
-    let value_len =
-        FpVar::new_witness(cs.clone(), || Ok(Fr::from(p.value.len() as u64))).unwrap();
+    let value_len = FpVar::new_witness(cs.clone(), || Ok(Fr::from(p.value.len() as u64))).unwrap();
     marks.push(("inputs allocated".to_string(), cs.num_constraints()));
 
     let mut nodes = Vec::with_capacity(TEST_DEPTH);
@@ -149,7 +147,10 @@ pub fn stage_map<V: MptVerifier<Fr>>(p: &NativeProof) -> Vec<(String, usize)> {
     let _ = V::verify_inclusion(&root, &key, &key_len, &value, &value_len, &nodes);
     marks.push(("verify done".to_string(), cs.num_constraints()));
     marks.push((
-        format!("UNSATISFIED at {:?}", cs.which_is_unsatisfied().ok().flatten()),
+        format!(
+            "UNSATISFIED at {:?}",
+            cs.which_is_unsatisfied().ok().flatten()
+        ),
         0,
     ));
     marks

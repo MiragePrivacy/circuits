@@ -183,20 +183,62 @@ mod tests {
         // ever dropped from `preimage()`, this catches it.
         let base = sample().hash();
         let mutations: Vec<Statement> = vec![
-            Statement { instance_domain: [0x12; 32], ..sample() },
-            Statement { chain_id: 2, ..sample() },
-            Statement { escrow: [0x23; 20], ..sample() },
-            Statement { request_id: [0x34; 32], ..sample() },
-            Statement { row_index: 1, ..sample() },
-            Statement { intent_commitment: [0x45; 32], ..sample() },
-            Statement { bond_attempt: 2, ..sample() },
-            Statement { bond_start_block: 1001, ..sample() },
-            Statement { bond_deadline: 1181, ..sample() },
-            Statement { bonded_collector: [0x56; 20], ..sample() },
-            Statement { row_payout_asset: [0x01; 20], ..sample() },
-            Statement { row_payout_amount: [0x01; 32], ..sample() },
-            Statement { witness_block_number: 1101, ..sample() },
-            Statement { witness_block_hash: [0x67; 32], ..sample() },
+            Statement {
+                instance_domain: [0x12; 32],
+                ..sample()
+            },
+            Statement {
+                chain_id: 2,
+                ..sample()
+            },
+            Statement {
+                escrow: [0x23; 20],
+                ..sample()
+            },
+            Statement {
+                request_id: [0x34; 32],
+                ..sample()
+            },
+            Statement {
+                row_index: 1,
+                ..sample()
+            },
+            Statement {
+                intent_commitment: [0x45; 32],
+                ..sample()
+            },
+            Statement {
+                bond_attempt: 2,
+                ..sample()
+            },
+            Statement {
+                bond_start_block: 1001,
+                ..sample()
+            },
+            Statement {
+                bond_deadline: 1181,
+                ..sample()
+            },
+            Statement {
+                bonded_collector: [0x56; 20],
+                ..sample()
+            },
+            Statement {
+                row_payout_asset: [0x01; 20],
+                ..sample()
+            },
+            Statement {
+                row_payout_amount: [0x01; 32],
+                ..sample()
+            },
+            Statement {
+                witness_block_number: 1101,
+                ..sample()
+            },
+            Statement {
+                witness_block_hash: [0x67; 32],
+                ..sample()
+            },
         ];
         assert_eq!(mutations.len(), 14, "one case per context field");
         for (i, m) in mutations.iter().enumerate() {

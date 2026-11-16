@@ -32,11 +32,11 @@ use ark_r1cs_std::alloc::AllocVar;
 use ark_r1cs_std::boolean::Boolean;
 use ark_r1cs_std::convert::ToBitsGadget;
 use ark_r1cs_std::eq::EqGadget;
-use ark_r1cs_std::GR1CSVar;
 use ark_r1cs_std::fields::fp::FpVar;
 use ark_r1cs_std::fields::FieldVar;
 use ark_r1cs_std::select::CondSelectGadget;
 use ark_r1cs_std::uint8::UInt8;
+use ark_r1cs_std::GR1CSVar;
 use ark_relations::gr1cs::{ConstraintSystemRef, SynthesisError};
 
 /// `sel[i] = 1` for `i < len`, else 0. Also enforces `len <= n`.
@@ -87,6 +87,19 @@ pub fn prefix_mask<F: PrimeField>(
     Ok(sel)
 }
 
+/// Enforces `len <= n` when `active`, without the zero-tail requirement.
+///
+/// [`assert_zero_tail`] carries the same bound, so use this only where a length
+/// is checked against a buffer it is not itself the extent of.
+pub fn assert_at_most<F: PrimeField>(
+    len: &FpVar<F>,
+    n: usize,
+    active: &Boolean<F>,
+) -> Result<(), SynthesisError> {
+    let _ = prefix_mask(len, n, active)?;
+    Ok(())
+}
+
 /// Requires `buf[i] == 0` for every `i >= len`.
 ///
 /// This is the check that makes a bounded buffer safe to hash or parse.
@@ -127,10 +140,7 @@ pub fn assert_zero_tail<F: PrimeField>(
 /// Proving those three facts is equivalent to proving each `out[i] = (idx ==
 /// i)` individually, at a fraction of the cost. Reuse the vector across every
 /// read against the same index.
-pub fn one_hot<F: PrimeField>(
-    idx: &FpVar<F>,
-    n: usize,
-) -> Result<Vec<Boolean<F>>, SynthesisError> {
+pub fn one_hot<F: PrimeField>(idx: &FpVar<F>, n: usize) -> Result<Vec<Boolean<F>>, SynthesisError> {
     let cs = idx.cs();
     let idx_val = idx.value().ok();
 
@@ -141,6 +151,35 @@ pub fn one_hot<F: PrimeField>(
     }
 
     enforce_one_hot(idx, &sel)?;
+    Ok(sel)
+}
+
+/// A one-hot indicator vector that must actually hit, when `active`.
+///
+/// [`one_hot`] alone permits the all-zero assignment for *any* index, because
+/// the all-zero vector is how an out-of-range index is encoded. That is the
+/// right default for a speculative read, and wrong wherever the caller knows
+/// the index is in range: a prover who claims out-of-range for an in-range
+/// index suppresses the read, and [`select_byte_with`] returns zero.
+///
+/// Suppressing a read is not the same as choosing an out-of-range index, and no
+/// range constraint on the index prevents it. Where a zero read would satisfy
+/// something, use this instead.
+///
+/// The hit assertion is separate from [`enforce_one_hot`] on purpose. That
+/// function's constraints define the indicators and must stay ungated; this one
+/// asserts a fact about the caller's data and is therefore gated.
+pub fn one_hot_in_range<F: PrimeField>(
+    idx: &FpVar<F>,
+    n: usize,
+    active: &Boolean<F>,
+) -> Result<Vec<Boolean<F>>, SynthesisError> {
+    let sel = one_hot(idx, n)?;
+    let mut sum = FpVar::zero();
+    for bit in &sel {
+        sum += FpVar::from(bit.clone());
+    }
+    sum.conditional_enforce_equal(&FpVar::one(), active)?;
     Ok(sel)
 }
 
@@ -188,23 +227,14 @@ pub fn select_byte<F: PrimeField>(
 
 /// Reads a byte using a precomputed one-hot indicator vector.
 ///
-/// Computed as a dot product over the bits: for each of the 8 bit positions,
-/// `out_bit = sum_i sel[i] AND buf[i]_bit`. Because `sel` is one-hot, that sum
-/// selects exactly the addressed byte's bit, and is 0 or 1.
-///
-/// The win over a `conditionally_select` chain is not the constraint count —
-/// both are O(N) — but that `sel` is built once and reused across every read
-/// against the same index, and that the products accumulate into one linear
-/// combination instead of N intermediate variables.
+/// Computed as a field-level dot product, `sum_i sel[i] * buf[i]`, then
+/// decomposed back into a byte: one constraint per position plus nine. Because
+/// `sel` is at most one-hot the sum is the addressed byte, or zero.
 pub fn select_byte_with<F: PrimeField>(
     buf: &[UInt8<F>],
     sel: &[Boolean<F>],
 ) -> Result<UInt8<F>, SynthesisError> {
-    let mut acc = UInt8::constant(0);
-    for (byte, hit) in buf.iter().zip(sel.iter()) {
-        acc = UInt8::conditionally_select(hit, byte, &acc)?;
-    }
-    Ok(acc)
+    field_to_byte(&dot(sel, &to_fields(buf)?))
 }
 
 /// Reads `l` consecutive bytes starting at a witness `offset`.
@@ -213,15 +243,9 @@ pub fn select_byte_with<F: PrimeField>(
 /// it across the whole run, rather than rebuilding it per byte. That is the
 /// difference between `l` equality tests per position and one.
 ///
-/// Measured, reading 32 bytes from a 256-byte buffer: 81,920 constraints
-/// naively, 62,080 shared. A 24% saving — real, but smaller than it looks,
-/// because the equality tests were only a quarter of the cost and the
-/// conditional selects that dominate cannot be shared.
-///
-/// Scale that up and it is alarming: a single [`select_byte`] is ~10
-/// constraints per buffer byte, so one 32-byte read from a 2048-byte receipt
-/// costs on the order of 500k constraints — more than three keccak blocks for
-/// one field.
+/// Each output byte costs one product per buffer position. Out-of-range
+/// offsets read zeros, which speculative callers rely on; where the offset is
+/// known to be in range, [`shift_window`] is far cheaper.
 ///
 /// **Read a fixed offset wherever the format fixes one.** Witness-dependent
 /// reads are the most expensive thing in this circuit after keccak itself, and
@@ -236,19 +260,15 @@ pub fn select_bytes<F: PrimeField>(
     // One indicator vector, shared across every output byte.
     let hit = one_hot(offset, n)?;
 
-    let mut out = Vec::with_capacity(l);
-    for j in 0..l {
-        let mut acc = UInt8::constant(0);
-        for i in 0..n {
+    let fields = to_fields(buf)?;
+    (0..l)
+        .map(|j| {
             // Output byte j reads buf[offset + j], so position i contributes
             // when offset == i - j.
-            if i >= j {
-                acc = UInt8::conditionally_select(&hit[i - j], &buf[i], &acc)?;
-            }
-        }
-        out.push(acc);
-    }
-    Ok(out)
+            let terms = if j < n { &fields[j..] } else { &[][..] };
+            field_to_byte(&dot(&hit, terms))
+        })
+        .collect()
 }
 
 /// Packs 16 big-endian bytes into one field element.
@@ -367,6 +387,178 @@ pub fn le<F: PrimeField>(a: &FpVar<F>, b: &FpVar<F>) -> Result<Boolean<F>, Synth
     Ok(lt(a, b)? | is_eq)
 }
 
+/// A buffer as field-valued bytes. Emits no constraints: each value is a
+/// linear combination of the byte's existing bits.
+pub fn to_fields<F: PrimeField>(buf: &[UInt8<F>]) -> Result<Vec<FpVar<F>>, SynthesisError> {
+    buf.iter().map(byte_to_field).collect()
+}
+
+/// A `UInt8` equal to a byte-valued field expression. Nine constraints: eight
+/// booleanity checks and the recomposition.
+///
+/// Unsatisfiable when `value` is not in `0..256`, so this doubles as a range
+/// check.
+pub fn field_to_byte<F: PrimeField>(value: &FpVar<F>) -> Result<UInt8<F>, SynthesisError> {
+    if let FpVar::Constant(c) = value {
+        return Ok(UInt8::constant(field_to_u64(*c) as u8));
+    }
+    let native = value.value().map(|v| field_to_u64(v) as u8).unwrap_or(0);
+    let byte = UInt8::new_witness(value.cs(), || Ok(native))?;
+    byte_to_field(&byte)?.enforce_equal(value)?;
+    Ok(byte)
+}
+
+/// `sum(sel[i] * vals[i])`, one constraint per non-constant term.
+pub fn dot<F: PrimeField>(sel: &[Boolean<F>], vals: &[FpVar<F>]) -> FpVar<F> {
+    let mut acc = FpVar::zero();
+    for (s, v) in sel.iter().zip(vals.iter()) {
+        acc += FpVar::from(s.clone()) * v;
+    }
+    acc
+}
+
+/// Little-endian bits of `value`, which must be below `2^n`. `n + 1`
+/// constraints.
+pub fn to_bits_bounded<F: PrimeField>(
+    value: &FpVar<F>,
+    n: usize,
+) -> Result<Vec<Boolean<F>>, SynthesisError> {
+    if let FpVar::Constant(c) = value {
+        let native = field_to_u64(*c);
+        assert!(n >= 64 || native >> n == 0, "constant exceeds {n} bits");
+        return Ok((0..n).map(|i| Boolean::constant((native >> i) & 1 == 1)).collect());
+    }
+    let native = value.value().map(field_to_u64).unwrap_or(0);
+    let mut acc = FpVar::zero();
+    let mut bits = Vec::with_capacity(n);
+    for i in 0..n {
+        let bit = Boolean::new_witness(value.cs(), || Ok((native >> i) & 1 == 1))?;
+        acc += FpVar::from(bit.clone()) * FpVar::constant(F::from(1u64 << i));
+        bits.push(bit);
+    }
+    acc.enforce_equal(value)?;
+    Ok(bits)
+}
+
+/// `out[j] = buf[offset + j]` for `j < width`, reading zero past the buffer.
+///
+/// A log-depth shifter over field-valued bytes. Each stage shifts by one power
+/// of two and only keeps the positions later stages can still reach, so a
+/// 32-byte read from a 532-byte node costs ~1.3k constraints where a one-hot
+/// read over the bits costs ~136k.
+///
+/// `offset` must be below the next power of two above `buf.len()`, or the
+/// decomposition is unsatisfiable. Offsets inside that range but past the
+/// buffer read zeros, so a caller that needs the read to land in the buffer
+/// must bound `offset` itself.
+pub fn shift_window<F: PrimeField>(
+    buf: &[FpVar<F>],
+    offset: &FpVar<F>,
+    width: usize,
+) -> Result<Vec<FpVar<F>>, SynthesisError> {
+    let stages = usize::BITS as usize - buf.len().leading_zeros() as usize;
+    let bits = to_bits_bounded(offset, stages)?;
+    let zero = FpVar::zero();
+    let mut cur = buf.to_vec();
+    for stage in (0..stages).rev() {
+        let step = 1 << stage;
+        let keep = (width + step - 1).min(cur.len());
+        let bit = FpVar::from(bits[stage].clone());
+        cur = (0..keep)
+            .map(|j| {
+                let here = &cur[j];
+                let there = cur.get(j + step).unwrap_or(&zero);
+                here + &bit * (there - here)
+            })
+            .collect();
+    }
+    cur.resize(width, zero);
+    Ok(cur)
+}
+
+/// `[x <= c]` for `x < 2^n` and constant `c < 2^n`. `n + 2` constraints.
+pub fn le_const<F: PrimeField>(x: &FpVar<F>, c: u64, n: usize) -> Result<Boolean<F>, SynthesisError> {
+    // c + 2^n - x lies in [c + 1, c + 2^n], below 2^(n + 1); its top bit is
+    // set exactly when x <= c.
+    let shifted = FpVar::constant(F::from(c + (1 << n))) - x;
+    Ok(to_bits_bounded(&shifted, n + 1)?[n].clone())
+}
+
+/// `out[i] = buf[i - amount]` for `i < width`, zero before `amount` and past
+/// the buffer. `amount` must be below `2^bits`. One constraint per output per
+/// bit of `amount`.
+pub fn shift_right<F: PrimeField>(
+    buf: &[FpVar<F>],
+    amount: &FpVar<F>,
+    width: usize,
+    bits: usize,
+) -> Result<Vec<FpVar<F>>, SynthesisError> {
+    let bits = to_bits_bounded(amount, bits)?;
+    let zero = FpVar::zero();
+    let mut cur: Vec<FpVar<F>> = (0..width)
+        .map(|i| buf.get(i).cloned().unwrap_or_else(FpVar::zero))
+        .collect();
+    for (stage, bit) in bits.iter().enumerate() {
+        let step = 1 << stage;
+        let bit = FpVar::from(bit.clone());
+        cur = (0..width)
+            .map(|i| {
+                let here = &cur[i];
+                let there = i.checked_sub(step).map(|at| &cur[at]).unwrap_or(&zero);
+                here + &bit * (there - here)
+            })
+            .collect();
+    }
+    Ok(cur)
+}
+
+/// `sel[i] = [i < len]` for `i < n`, requiring `len <= n` unconditionally.
+///
+/// Two constraints per position: booleanity and monotonicity. With the sum
+/// pinned to `len`, a monotone boolean vector is exactly the prefix mask.
+/// Unlike [`prefix_mask`] there is no speculative mode: a length past `n` is
+/// unsatisfiable whatever the caller's `active` flag.
+pub fn prefix_mask_exact<F: PrimeField>(
+    len: &FpVar<F>,
+    n: usize,
+) -> Result<Vec<Boolean<F>>, SynthesisError> {
+    let native = len.value().map(field_to_u64).unwrap_or(0);
+    let mut sel: Vec<Boolean<F>> = Vec::with_capacity(n);
+    let mut sum = FpVar::zero();
+    for i in 0..n {
+        let bit = Boolean::new_witness(len.cs(), || Ok((i as u64) < native))?;
+        if let Some(prev) = sel.last() {
+            // Once zero, stays zero.
+            (FpVar::from(bit.clone()) * (FpVar::one() - FpVar::from(prev.clone())))
+                .enforce_equal(&FpVar::zero())?;
+        }
+        sum += FpVar::from(bit.clone());
+        sel.push(bit);
+    }
+    sum.enforce_equal(len)?;
+    Ok(sel)
+}
+
+/// Requires `buf[i] == 0` wherever `mask[i]` is false. One constraint per byte.
+pub fn assert_zero_outside<F: PrimeField>(
+    buf: &[FpVar<F>],
+    mask: &[Boolean<F>],
+) -> Result<(), SynthesisError> {
+    for (byte, keep) in buf.iter().zip(mask.iter()) {
+        (byte * (FpVar::one() - FpVar::from(keep.clone()))).enforce_equal(&FpVar::zero())?;
+    }
+    Ok(())
+}
+
+fn field_to_u64<F: PrimeField>(v: F) -> u64 {
+    use ark_ff::BigInteger;
+    let bytes = v.into_bigint().to_bytes_le();
+    let mut out = [0u8; 8];
+    let n = bytes.len().min(8);
+    out[..n].copy_from_slice(&bytes[..n]);
+    u64::from_le_bytes(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -428,7 +620,10 @@ mod tests {
     fn prefix_mask_rejects_len_past_the_bound() {
         let cs = ConstraintSystem::<Fr>::new_ref();
         let _ = prefix_mask(&fp(cs.clone(), 9), 8, &Boolean::TRUE).unwrap();
-        assert!(!cs.is_satisfied().unwrap(), "len 9 accepted for an 8-byte buffer");
+        assert!(
+            !cs.is_satisfied().unwrap(),
+            "len 9 accepted for an 8-byte buffer"
+        );
     }
 
     #[test]
@@ -544,7 +739,10 @@ mod tests {
         let shared = cs_b.num_constraints() - before_b;
 
         println!("reading {l} bytes from {n}: naive {naive}, shared {shared}");
-        assert!(shared < naive, "sharing did not reduce cost: {shared} vs {naive}");
+        assert!(
+            shared < naive,
+            "sharing did not reduce cost: {shared} vs {naive}"
+        );
     }
 
     #[test]
@@ -555,7 +753,130 @@ mod tests {
             let idx = fp(cs.clone(), 0);
             let before = cs.num_constraints();
             let _ = select_byte(&buf, &idx).unwrap();
-            println!("select_byte over {n} bytes: {} constraints", cs.num_constraints() - before);
+            println!(
+                "select_byte over {n} bytes: {} constraints",
+                cs.num_constraints() - before
+            );
         }
+    }
+
+    /// Adds `delta` to one witness variable's assignment.
+    ///
+    /// Symbolic linear combinations cache their values when created. The system
+    /// is finalized (inlining every combination into witness terms) and the
+    /// cache dropped, so each constraint re-evaluates from the edited witness.
+    fn tamper(cs: &ConstraintSystemRef<Fr>, variable: ark_relations::gr1cs::Variable, delta: Fr) {
+        cs.finalize();
+        let index = variable.index().expect("a witness variable");
+        let mut inner = cs.borrow_mut().unwrap();
+        inner.assignments.witness_assignment[index] += delta;
+        inner.assignments.lc_assignment.clear();
+    }
+
+    fn bit_variable(bit: &Boolean<Fr>) -> ark_relations::gr1cs::Variable {
+        match bit {
+            Boolean::Var(b) => b.variable(),
+            Boolean::Constant(_) => panic!("expected an allocated bit"),
+        }
+    }
+
+    #[test]
+    fn field_to_byte_binds_its_bits() {
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        let byte = field_to_byte(&fp(cs.clone(), 0x5a)).unwrap();
+        assert_eq!(byte.value().unwrap(), 0x5a);
+        assert!(cs.is_satisfied().unwrap());
+        let bit = byte.to_bits_le().unwrap()[1].clone();
+        tamper(&cs, bit_variable(&bit), -Fr::from(1u64));
+        assert!(!cs.is_satisfied().unwrap(), "a byte detached from its value");
+
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        let _ = field_to_byte(&fp(cs.clone(), 256)).unwrap();
+        assert!(!cs.is_satisfied().unwrap(), "accepted 256 as a byte");
+    }
+
+    #[test]
+    fn to_bits_bounded_binds_and_bounds() {
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        let bits = to_bits_bounded(&fp(cs.clone(), 9), 8).unwrap();
+        assert!(cs.is_satisfied().unwrap());
+        tamper(&cs, bit_variable(&bits[1]), Fr::from(1u64));
+        assert!(!cs.is_satisfied().unwrap(), "bits detached from their value");
+
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        let _ = to_bits_bounded(&fp(cs.clone(), 300), 8).unwrap();
+        assert!(!cs.is_satisfied().unwrap(), "accepted 300 in eight bits");
+    }
+
+    #[test]
+    fn prefix_mask_exact_is_exactly_the_length() {
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        let mask = prefix_mask_exact(&fp(cs.clone(), 5), 10).unwrap();
+        let values: Vec<bool> = mask.iter().map(|b| b.value().unwrap()).collect();
+        assert_eq!(values, (0..10).map(|i| i < 5).collect::<Vec<_>>());
+        assert!(cs.is_satisfied().unwrap());
+
+        // Moving the edge either way, or punching a hole, must fail.
+        for (at, delta) in [(5, 1i64), (4, -1), (2, -1)] {
+            let cs = ConstraintSystem::<Fr>::new_ref();
+            let mask = prefix_mask_exact(&fp(cs.clone(), 5), 10).unwrap();
+            let delta = if delta > 0 { Fr::from(1u64) } else { -Fr::from(1u64) };
+            tamper(&cs, bit_variable(&mask[at]), delta);
+            assert!(!cs.is_satisfied().unwrap(), "accepted a mask edited at {at}");
+        }
+
+        // A hole inside the prefix paid for by a bit past it keeps the sum, so
+        // only monotonicity catches it. In the sponge this would exempt a byte
+        // past the length from the zero tail.
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        let mask = prefix_mask_exact(&fp(cs.clone(), 5), 10).unwrap();
+        tamper(&cs, bit_variable(&mask[2]), -Fr::from(1u64));
+        tamper(&cs, bit_variable(&mask[7]), Fr::from(1u64));
+        assert!(!cs.is_satisfied().unwrap(), "accepted a non-monotone mask");
+
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        let _ = prefix_mask_exact(&fp(cs.clone(), 11), 10).unwrap();
+        assert!(!cs.is_satisfied().unwrap(), "accepted a length past the buffer");
+    }
+
+    #[test]
+    fn assert_zero_outside_rejects_a_dirty_tail() {
+        for (data, ok) in [(vec![1u8, 2, 3, 0, 0], true), (vec![1, 2, 3, 0, 7], false)] {
+            let cs = ConstraintSystem::<Fr>::new_ref();
+            let buf = alloc_bounded(cs.clone(), &data, 5).unwrap();
+            let mask = prefix_mask_exact(&fp(cs.clone(), 3), 5).unwrap();
+            assert_zero_outside(&to_fields(&buf).unwrap(), &mask).unwrap();
+            assert_eq!(cs.is_satisfied().unwrap(), ok, "{data:?}");
+        }
+    }
+
+    #[test]
+    fn shifts_read_the_addressed_window() {
+        let data: Vec<u8> = (1..=40).collect();
+        for offset in [0usize, 1, 7, 31, 39, 40, 63] {
+            let cs = ConstraintSystem::<Fr>::new_ref();
+            let buf = to_fields(&alloc_bounded(cs.clone(), &data, 40).unwrap()).unwrap();
+            let left = shift_window(&buf, &fp(cs.clone(), offset as u64), 4).unwrap();
+            let right = shift_right(&buf, &fp(cs.clone(), offset as u64 % 16), 44, 4).unwrap();
+            for (j, v) in left.iter().enumerate() {
+                let want = data.get(offset + j).copied().unwrap_or(0);
+                assert_eq!(v.value().unwrap(), Fr::from(want as u64), "left {offset}+{j}");
+            }
+            for (i, v) in right.iter().enumerate() {
+                let want = i
+                    .checked_sub(offset % 16)
+                    .and_then(|at| data.get(at))
+                    .copied()
+                    .unwrap_or(0);
+                assert_eq!(v.value().unwrap(), Fr::from(want as u64), "right {i}");
+            }
+            assert!(cs.is_satisfied().unwrap());
+        }
+
+        // The offset is decomposed exactly: one past the shifter's range fails.
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        let buf = to_fields(&alloc_bounded(cs.clone(), &data, 40).unwrap()).unwrap();
+        let _ = shift_window(&buf, &fp(cs.clone(), 64), 4).unwrap();
+        assert!(!cs.is_satisfied().unwrap(), "accepted an offset past the shifter");
     }
 }

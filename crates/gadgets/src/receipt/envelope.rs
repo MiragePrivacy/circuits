@@ -39,6 +39,40 @@ pub struct Payload<F: PrimeField> {
 /// `logsBloom` is fixed at 256 bytes by consensus.
 pub const BLOOM_BYTES: u64 = 256;
 
+/// Enforces `status == 1` on a receipt the caller has authenticated.
+///
+/// An included receipt is consensus-encoded, so its layout follows from the
+/// first byte alone: an optional type prefix, a `0xf9` list header (the bloom
+/// alone makes the payload at least 256 bytes), then the status item. Success
+/// is the single byte `0x01`; failure is `0x80`, and a pre-Byzantium state
+/// root starts `0xa0`, so both are rejected. An unknown envelope fails the
+/// header check, and the list must close at `receipt_len`.
+///
+/// Five fixed-offset reads, against the full payload walk of [`parse`].
+pub fn enforce_success<F: PrimeField>(
+    receipt: &[UInt8<F>],
+    receipt_len: &FpVar<F>,
+    active: &Boolean<F>,
+) -> Result<(), SynthesisError> {
+    assert!(receipt.len() >= 5, "receipt buffer too small");
+    let r = crate::bytes::to_fields(&receipt[..5])?;
+    let constant = |v: u64| FpVar::constant(F::from(v));
+
+    // A type prefix is 0x01-0x04; anything else must itself be the legacy
+    // list header, which the 0xf9 check below then requires. That check is
+    // what rejects an unknown envelope.
+    let mut typed = FpVar::zero();
+    for t in 1..=4 {
+        typed += FpVar::from(r[0].is_eq(&constant(t))?);
+    }
+
+    let at =|k: usize| &r[k] + &typed * (&r[k + 1] - &r[k]);
+    at(0).conditional_enforce_equal(&constant(0xf9), active)?;
+    let payload = at(1) * constant(256) + at(2);
+    (typed.clone() + constant(3) + payload).conditional_enforce_equal(receipt_len, active)?;
+    at(3).conditional_enforce_equal(&FpVar::one(), active)
+}
+
 /// Parses the envelope and payload, enforcing everything spec 12.6.1 requires
 /// except the log contents.
 ///
@@ -75,7 +109,8 @@ pub fn parse<F: PrimeField>(
     let is_list_header = bits[7].clone() & bits[6].clone();
 
     // Exactly one of the two, positively. Anything else fails closed.
-    (is_typed.clone() | is_list_header.clone()).conditional_enforce_equal(&Boolean::TRUE, active)?;
+    (is_typed.clone() | is_list_header.clone())
+        .conditional_enforce_equal(&Boolean::TRUE, active)?;
     (is_typed.clone() & is_list_header).conditional_enforce_equal(&Boolean::FALSE, active)?;
 
     // The payload begins after the prefix, if there is one.
@@ -85,7 +120,8 @@ pub fn parse<F: PrimeField>(
     // the tiling; a fifth item or a gap is rejected there.
     let items = Cursor::decode_list(receipt, &payload_at, 4, active)?;
     let list = Cursor::decode_item(receipt, &payload_at, active)?;
-    list.is_list.conditional_enforce_equal(&Boolean::TRUE, active)?;
+    list.is_list
+        .conditional_enforce_equal(&Boolean::TRUE, active)?;
 
     // The receipt must end where the payload ends: no trailing bytes.
     list.end().conditional_enforce_equal(receipt_len, active)?;
@@ -114,10 +150,7 @@ pub fn parse<F: PrimeField>(
     // cumulativeGasUsed below 2^64: at most 8 payload bytes. The RLP decoder
     // already rejects non-canonical encodings, so a short field cannot have
     // leading zeros.
-    let gas_ok = crate::bytes::le(
-        &cumulative_gas.payload_len,
-        &FpVar::constant(F::from(8u64)),
-    )?;
+    let gas_ok = crate::bytes::le(&cumulative_gas.payload_len, &FpVar::constant(F::from(8u64)))?;
     gas_ok.conditional_enforce_equal(&Boolean::TRUE, active)?;
 
     Ok(Payload {

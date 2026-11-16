@@ -1,0 +1,9 @@
+[package]
+name = "dump"
+version = "0.1.0"
+edition = "2024"
+[dependencies]
+gkr = { git = "https://github.com/reilabs/keccacheck.git", rev = "15f00e3da5622f1c7155b02d1f9c00bd2416c282", default-features = false }
+keccak = "0.1.5"
+ark-bn254 = { version = "0.5", features = ["std"] }
+[workspace]

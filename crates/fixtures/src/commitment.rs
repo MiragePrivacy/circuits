@@ -41,6 +41,36 @@ pub fn derive(
     recipient: &[u8; 20],
     amount: &[u8; 32],
 ) -> Intent {
+    derive_kind(
+        tx_hash,
+        mirage_encoding::AssetKind::Erc20,
+        token,
+        recipient,
+        amount,
+    )
+}
+
+/// Derives the commitment for one native ETH settlement.
+///
+/// The token is all-zero, which spec 8.3 requires of a native row and
+/// `commitment::open` enforces against the asset kind.
+pub fn derive_native(tx_hash: &[u8; 32], recipient: &[u8; 20], amount: &[u8; 32]) -> Intent {
+    derive_kind(
+        tx_hash,
+        mirage_encoding::AssetKind::Native,
+        &[0u8; 20],
+        recipient,
+        amount,
+    )
+}
+
+fn derive_kind(
+    tx_hash: &[u8; 32],
+    asset_kind: mirage_encoding::AssetKind,
+    token: &[u8; 20],
+    recipient: &[u8; 20],
+    amount: &[u8; 32],
+) -> Intent {
     let d = |tag: &[u8], n: usize| -> Vec<u8> {
         let mut input = tx_hash.to_vec();
         input.extend_from_slice(tag);
@@ -61,7 +91,7 @@ pub fn derive(
     preimage.extend_from_slice(&escrow);
     preimage.extend_from_slice(&request_id);
     preimage.extend_from_slice(&row_index.to_be_bytes());
-    preimage.push(mirage_encoding::AssetKind::Erc20 as u8);
+    preimage.push(asset_kind as u8);
     preimage.extend_from_slice(token);
     preimage.extend_from_slice(recipient);
     preimage.extend_from_slice(amount);
@@ -74,7 +104,7 @@ pub fn derive(
         escrow: hex_str(&escrow),
         request_id: hex_str(&request_id),
         row_index,
-        asset_kind: mirage_encoding::AssetKind::Erc20 as u8,
+        asset_kind: asset_kind as u8,
         settlement_token: hex_str(token),
         recipient: hex_str(recipient),
         settlement_amount: hex_str(amount),
@@ -133,6 +163,53 @@ mod tests {
             "commitment differs from the reference encoder"
         );
         assert!(want.validate().is_ok(), "derived intent fails spec 12.3");
+    }
+
+    /// The native variant must also match the reference encoder, with an
+    /// all-zero token that `validate` accepts only because the kind is native.
+    #[test]
+    fn native_matches_the_reference_encoder() {
+        let tx = [0x5c; 32];
+        let recipient = [0x22; 20];
+        let mut amount = [0u8; 32];
+        amount[16..].copy_from_slice(&1_000_000_000_000_000_000u128.to_be_bytes());
+
+        let got = derive_native(&tx, &recipient, &amount);
+        assert_eq!(got.asset_kind, AssetKind::Native as u8);
+        assert_eq!(got.settlement_token, crate::hex_str(&[0u8; 20]));
+
+        let want = NativeIntent {
+            instance_domain: arr(&got.instance_domain),
+            chain_id: 1,
+            escrow: arr(&got.escrow),
+            request_id: arr(&got.request_id),
+            row_index: got.row_index,
+            asset_kind: AssetKind::Native,
+            settlement_token: [0u8; 20],
+            recipient,
+            settlement_amount: amount,
+            salt: arr(&got.salt),
+        };
+
+        assert_eq!(got.preimage, crate::hex_str(&want.preimage()));
+        assert_eq!(got.commitment, crate::hex_str(&want.commitment()));
+        assert!(want.validate().is_ok(), "derived intent fails spec 12.3");
+    }
+
+    /// The asset kind is part of the preimage, so the same settlement details
+    /// under a different kind must not collide.
+    #[test]
+    fn native_and_erc20_commitments_differ() {
+        let tx = [0x7d; 32];
+        let recipient = [0x22; 20];
+        let amount = [0x01; 32];
+
+        let native = derive_native(&tx, &recipient, &amount);
+        let erc20 = derive(&tx, &[0u8; 20], &recipient, &amount);
+        assert_ne!(
+            native.commitment, erc20.commitment,
+            "asset kind must change the commitment"
+        );
     }
 
     #[test]

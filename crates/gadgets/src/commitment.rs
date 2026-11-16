@@ -51,8 +51,8 @@ use ark_r1cs_std::eq::EqGadget;
 use ark_r1cs_std::uint8::UInt8;
 use ark_relations::gr1cs::SynthesisError;
 
-use crate::keccak::keccak256_fixed;
 use crate::keccak::sponge::to_bytes;
+use crate::keccak::{keccak256_fixed_with, DirectPermutation, PermutationBackend};
 
 /// Byte width of the spec 8.3 preimage.
 pub const PREIMAGE_LEN: usize = 226;
@@ -139,9 +139,18 @@ pub fn open<F: PrimeField>(
     commitment: &[UInt8<F>],
     active: &Boolean<F>,
 ) -> Result<(), SynthesisError> {
+    open_with(opening, commitment, active, &mut DirectPermutation)
+}
+
+pub fn open_with<F: PrimeField, B: PermutationBackend<F>>(
+    opening: &Opening<F>,
+    commitment: &[UInt8<F>],
+    active: &Boolean<F>,
+    backend: &mut B,
+) -> Result<(), SynthesisError> {
     assert_eq!(commitment.len(), 32, "commitment must be 32 bytes");
 
-    let digest_bits = keccak256_fixed(&to_bytes(&opening.preimage())?)?;
+    let digest_bits = keccak256_fixed_with(&to_bytes(&opening.preimage())?, backend)?;
     for (bits, want) in digest_bits.iter().zip(commitment.iter()) {
         UInt8::from_bits_le(bits).conditional_enforce_equal(want, active)?;
     }
@@ -150,7 +159,9 @@ pub fn open<F: PrimeField>(
     let is_native = opening
         .asset_kind
         .is_eq(&UInt8::constant(ASSET_KIND_NATIVE))?;
-    let is_erc20 = opening.asset_kind.is_eq(&UInt8::constant(ASSET_KIND_ERC20))?;
+    let is_erc20 = opening
+        .asset_kind
+        .is_eq(&UInt8::constant(ASSET_KIND_ERC20))?;
     (is_native.clone() | is_erc20).conditional_enforce_equal(&Boolean::TRUE, active)?;
 
     // A native row's token must be exactly zero; an ERC-20 row's must not be.
@@ -243,7 +254,11 @@ mod tests {
         let i = native_sample();
         let cs = ConstraintSystem::<Fr>::new_ref();
         let opening = alloc(cs.clone(), &i);
-        let got: Vec<u8> = opening.preimage().iter().map(|b| b.value().unwrap()).collect();
+        let got: Vec<u8> = opening
+            .preimage()
+            .iter()
+            .map(|b| b.value().unwrap())
+            .collect();
         assert_eq!(got.len(), PREIMAGE_LEN);
         assert_eq!(got, i.preimage().to_vec(), "preimage bytes differ");
     }
@@ -271,7 +286,10 @@ mod tests {
         let i = native_sample();
         let mut wrong = i.commitment();
         wrong[0] ^= 0xff;
-        assert!(!run(&i, wrong), "accepted an opening against a wrong commitment");
+        assert!(
+            !run(&i, wrong),
+            "accepted an opening against a wrong commitment"
+        );
     }
 
     /// **Forgery: swapping the recipient while keeping the commitment.**
@@ -297,7 +315,10 @@ mod tests {
         i.asset_kind = AssetKind::Native;
         // Commitment computed over the inconsistent opening, so the hash
         // matches; only the intent assertion can catch it.
-        assert!(!run(&i, i.commitment()), "accepted a native row with a token");
+        assert!(
+            !run(&i, i.commitment()),
+            "accepted a native row with a token"
+        );
     }
 
     /// **Forgery: an ERC-20 row with a zero token.**
@@ -305,7 +326,10 @@ mod tests {
     fn rejects_erc20_without_a_token() {
         let mut i = native_sample();
         i.settlement_token = [0u8; 20];
-        assert!(!run(&i, i.commitment()), "accepted an ERC-20 row with no token");
+        assert!(
+            !run(&i, i.commitment()),
+            "accepted an ERC-20 row with no token"
+        );
     }
 
     /// **Forgery: a zero recipient.**
@@ -344,7 +368,10 @@ mod tests {
         let mut b = native_sample();
         b.escrow = [0x23; 20];
         assert_ne!(a.commitment(), b.commitment());
-        assert!(!run(&b, a.commitment()), "proof was portable between escrows");
+        assert!(
+            !run(&b, a.commitment()),
+            "proof was portable between escrows"
+        );
     }
 
     #[test]

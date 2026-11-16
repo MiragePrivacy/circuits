@@ -2,6 +2,7 @@
 //!
 //! ```sh
 //! cargo run -p mirage-prover --release --bin export-verifier
+//! cargo run -p mirage-prover --release --bin export-verifier -- --keccachecheck
 //! ```
 //!
 //! Writes three artifacts to `contracts/`:
@@ -18,7 +19,7 @@
 //! produces the actual contract for the actual verification key, so the size
 //! can be compiled and measured rather than inherited.
 
-use std::path::PathBuf;
+mod export_common;
 
 use ark_bn254::Bn254;
 use ark_groth16::VerifyingKey;
@@ -26,21 +27,63 @@ use taceo_groth16_sol::{SolidityVerifierConfig, SolidityVerifierContext};
 
 use mirage_relation::{fixture, Bounds};
 fn main() {
+    let keccachecheck = std::env::args().any(|arg| arg == "--keccachecheck");
     // CARGO_MANIFEST_DIR is `crates/prover`, so reaching the repo's
 
     // `contracts/` takes two levels up, not one.
-    let out = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../contracts");
+    let out = export_common::output_dir();
     std::fs::create_dir_all(&out).expect("create contracts/");
 
     let bounds = Bounds::default();
-    let witness = fixture::genuine();
+    let mut witness = fixture::genuine();
+    if std::env::args().any(|arg| arg == "--gas-sim") {
+        witness.statement.bond_deadline = witness.statement.bond_start_block + 75;
+    }
+
+    let batch_row = std::env::args().any(|arg| arg == "--batch-row");
+    if batch_row {
+        assert!(keccachecheck, "batch fixtures require Keccacheck");
+        witness.statement.bond_start_block = 20_999_990;
+        witness.statement.bond_deadline = witness.statement.bond_start_block + 75;
+        witness.statement.witness_block_number = 20_999_999;
+        witness.headers = fixture::header_chain(
+            &[0x44; 32],
+            &witness.root.clone().try_into().expect("receipt root"),
+            witness.statement.witness_block_number - fixture::MIN_DISTANCE as u64,
+            fixture::MIN_DISTANCE,
+        );
+        witness.statement.witness_block_hash = fixture::keccak(&witness.headers[0]);
+        witness.intent.row_index = 1;
+        witness.statement.row_index = 1;
+        let i = &witness.intent;
+        witness.statement.intent_commitment = mirage_encoding::commitment::Intent {
+            instance_domain: i.instance_domain,
+            chain_id: i.chain_id,
+            escrow: i.escrow,
+            request_id: i.request_id,
+            row_index: i.row_index,
+            asset_kind: mirage_encoding::AssetKind::Erc20,
+            settlement_token: i.settlement_token,
+            recipient: i.recipient,
+            settlement_amount: i.settlement_amount,
+            salt: i.salt,
+        }
+        .commitment();
+    }
 
     // Setup. This is `circuit_specific_setup`, a toy: spec 18.2 requires a
     // multiparty Phase 2 producing the same artifact soundly. The verifier
     // rendered below is structurally identical either way, so the size and gas
     // measurements hold; only the key's provenance differs.
     eprintln!("setup...");
-    let keys = mirage_prover::setup(bounds, 0).expect("setup");
+    let keys = if let Some(keys) = export_common::ceremony_keys() {
+        assert!(keccachecheck, "ceremony keys require Keccacheck");
+        keys
+    } else if keccachecheck {
+        mirage_prover::setup_keccacheck(bounds, 0).expect("Keccacheck setup")
+    } else {
+        mirage_prover::setup(bounds, 0).expect("setup")
+    };
 
     // The contract.
     eprintln!("rendering verifier...");
@@ -57,14 +100,35 @@ fn main() {
     // compiled. `prove` verifies natively before returning: a contract test
     // that fails is ambiguous unless the proof is known good.
     eprintln!("proving...");
-    let settlement = mirage_prover::prove_seeded(&keys, bounds, &witness, 0).expect("prove");
+    let settlement = if keccachecheck {
+        mirage_prover::prove_keccacheck_seeded(&keys, bounds, &witness, 0)
+            .expect("Keccacheck prove")
+    } else {
+        mirage_prover::prove_seeded(&keys, bounds, &witness, 0).expect("prove")
+    };
     let [hi, lo] = settlement.signals;
 
     let json = proof_json(&settlement.proof, hi, lo, &witness);
-    std::fs::write(out.join("proof.json"), &json).expect("write proof.json");
+    std::fs::write(
+        out.join(if batch_row {
+            "batch_row_proof.json"
+        } else {
+            "proof.json"
+        }),
+        &json,
+    )
+    .expect("write proof.json");
 
     let calldata = calldata(&settlement.proof, hi, lo);
-    std::fs::write(out.join("calldata.txt"), &calldata).expect("write calldata.txt");
+    std::fs::write(
+        out.join(if batch_row {
+            "batch_row_calldata.txt"
+        } else {
+            "calldata.txt"
+        }),
+        &calldata,
+    )
+    .expect("write calldata.txt");
 
     eprintln!("\n{}", calldata);
     eprintln!("Next: compile Verifier.sol with solc and call verifyProof with the above.");
@@ -84,7 +148,6 @@ fn render(vk: &VerifyingKey<Bn254>) -> String {
     .render()
     .expect("render template")
 }
-
 
 fn proof_json(proof: &[[u8; 32]; 8], hi: u128, lo: u128, w: &mirage_relation::Witness) -> String {
     let p = proof.map(|w| format!("0x{}", hex::encode(w)));
@@ -117,7 +180,16 @@ fn proof_json(proof: &[[u8; 32]; 8], hi: u128, lo: u128, w: &mirage_relation::Wi
   "note": "proof is [a.x, a.y, b.x1, b.x0, b.y1, b.y0, c.x, c.y]; the EVM pairing precompile takes G2 coordinates in that order, which is the reverse of arkworks' serialization. The statement block is what the escrow must reproduce from its own state for this proof to verify against it."
 }}
 "#,
-        p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], hi, lo,
+        p[0],
+        p[1],
+        p[2],
+        p[3],
+        p[4],
+        p[5],
+        p[6],
+        p[7],
+        hi,
+        lo,
         hx(&s.instance_domain),
         s.chain_id,
         hx(&s.escrow),

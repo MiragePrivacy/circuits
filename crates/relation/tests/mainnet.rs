@@ -12,8 +12,12 @@ use std::path::PathBuf;
 
 use ark_bn254::Fr;
 use ark_relations::gr1cs::{ConstraintSynthesizer, ConstraintSystem};
-use mirage_relation::{Bounds, IntentOpening, ReceiptCircuit, StatementContext, Witness};
+use mirage_relation::{
+    fixture, Bounds, IntentOpening, KeccacheckReceiptCircuit, StatementContext, Witness,
+};
 use serde::Deserialize;
+
+mod common;
 
 #[derive(Deserialize)]
 struct Dataset {
@@ -57,8 +61,7 @@ struct FixtureIntent {
 }
 
 fn dataset_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../test/vectors/mainnet.json")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../test/vectors/mainnet.json")
 }
 
 fn load() -> Option<Dataset> {
@@ -80,12 +83,14 @@ fn arr<const N: usize>(s: &str) -> [u8; N] {
 }
 
 fn witness(f: &Fixture) -> Witness {
-    let header = bytes(&f.header);
+    // Synthetic descendants above the real transaction header stand in for
+    // the later canonical witness block.
+    let headers = fixture::descendants(bytes(&f.header), f.block_number, fixture::MIN_DISTANCE);
     Witness {
         root: bytes(&f.receipts_root),
         key: bytes(&f.key),
         receipt: bytes(&f.receipt),
-        header: header.clone(),
+        headers: headers.clone(),
         nodes: f.nodes.iter().map(|n| bytes(n)).collect(),
         log_index: 0,
         intent: IntentOpening {
@@ -119,10 +124,10 @@ fn witness(f: &Fixture) -> Witness {
                 a[24..].copy_from_slice(&1_000_000_000u64.to_be_bytes());
                 a
             },
-            witness_block_number: f.block_number,
-            // The header's own keccak, not a placeholder: the relation binds
-            // the parsed header to the block hash the statement names.
-            witness_block_hash: mirage_encoding::keccak256(&header),
+            witness_block_number: f.block_number + fixture::MIN_DISTANCE as u64,
+            // The witness header's own keccak: the chain reaches the real
+            // transaction header only through it.
+            witness_block_hash: mirage_encoding::keccak256(&headers[0]),
         },
     }
 }
@@ -131,7 +136,10 @@ fn witness(f: &Fixture) -> Witness {
 fn bounds(d: &Dataset) -> Bounds {
     let b = Bounds::default();
     let max = |f: &dyn Fn(&Fixture) -> usize| d.fixtures.iter().map(f).max().unwrap_or(0);
-    assert!(max(&|f| f.depth) <= b.depth, "a fixture is deeper than the bound");
+    assert!(
+        max(&|f| f.depth) <= b.depth,
+        "a fixture is deeper than the bound"
+    );
     assert!(
         max(&|f| f.max_node_bytes) <= b.node_bytes,
         "a fixture node exceeds the bound"
@@ -169,24 +177,27 @@ fn satisfies_every_mainnet_fixture() {
     assert!(!d.fixtures.is_empty(), "empty dataset");
     let b = bounds(&d);
 
-    let mut failed = Vec::new();
-    for f in &d.fixtures {
-        let cs = ConstraintSystem::<Fr>::new_ref();
-        ReceiptCircuit::prove(b, witness(f))
-            .generate_constraints(cs.clone())
-            .expect("synthesis");
-        if !cs.is_satisfied().unwrap_or(false) {
-            failed.push(format!(
-                "{} (block {}, tx {}, type {}, depth {}): {:?}",
-                f.tx_hash,
-                f.block_number,
-                f.tx_index,
-                f.receipt_type,
-                f.depth,
-                cs.which_is_unsatisfied().ok().flatten()
-            ));
-        }
-    }
+    // The production circuit: every permutation goes through Keccacheck.
+    let failed = common::run(
+        &d.fixtures,
+        |f| {
+            format!(
+                "{} (block {}, tx {}, type {}, depth {})",
+                f.tx_hash, f.block_number, f.tx_index, f.receipt_type, f.depth
+            )
+        },
+        |f| {
+            let cs = ConstraintSystem::<Fr>::new_ref();
+            KeccacheckReceiptCircuit::prove(b, witness(f))
+                .generate_constraints(cs.clone())
+                .expect("synthesis");
+            cs.finalize();
+            match cs.is_satisfied() {
+                Ok(true) => Ok(()),
+                _ => Err(format!("{:?}", cs.which_is_unsatisfied().ok().flatten())),
+            }
+        },
+    );
 
     assert!(
         failed.is_empty(),
@@ -196,6 +207,35 @@ fn satisfies_every_mainnet_fixture() {
         failed.join("\n  ")
     );
     eprintln!("all {} mainnet fixtures satisfied", d.fixtures.len());
+}
+
+/// Fast integration gate for the experimental batched-Keccak circuit. Use the
+/// deepest collected proof so branch/extension chaining is exercised without
+/// paying for 100 GKR satisfaction scans on every optimization iteration.
+#[test]
+fn keccacheck_satisfies_a_deep_mainnet_fixture() {
+    let Some(d) = load() else {
+        return;
+    };
+    let b = bounds(&d);
+    let fixture = d
+        .fixtures
+        .iter()
+        .max_by_key(|fixture| fixture.depth)
+        .expect("nonempty fixture set");
+    let cs = ConstraintSystem::<Fr>::new_ref();
+    KeccacheckReceiptCircuit::prove(b, witness(fixture))
+        .generate_constraints(cs.clone())
+        .expect("synthesis");
+    assert!(
+        cs.is_satisfied().unwrap_or(false),
+        "Keccacheck failed {} (block {}, tx {}, depth {}): {:?}",
+        fixture.tx_hash,
+        fixture.block_number,
+        fixture.tx_index,
+        fixture.depth,
+        cs.which_is_unsatisfied().ok().flatten()
+    );
 }
 
 /// The dataset must cover more than one shape, or it is not testing variety.
@@ -210,8 +250,7 @@ fn dataset_is_varied() {
         .iter()
         .map(|f| f.intent.settlement_token.as_str())
         .collect();
-    let types: std::collections::BTreeSet<u8> =
-        d.fixtures.iter().map(|f| f.receipt_type).collect();
+    let types: std::collections::BTreeSet<u8> = d.fixtures.iter().map(|f| f.receipt_type).collect();
     let blocks: std::collections::BTreeSet<u64> =
         d.fixtures.iter().map(|f| f.block_number).collect();
 
@@ -236,8 +275,11 @@ fn commitments_are_distinct() {
     let Some(d) = load() else {
         return;
     };
-    let set: std::collections::BTreeSet<&str> =
-        d.fixtures.iter().map(|f| f.intent.commitment.as_str()).collect();
+    let set: std::collections::BTreeSet<&str> = d
+        .fixtures
+        .iter()
+        .map(|f| f.intent.commitment.as_str())
+        .collect();
     assert_eq!(
         set.len(),
         d.fixtures.len(),

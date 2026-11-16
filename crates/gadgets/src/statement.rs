@@ -33,8 +33,8 @@ use ark_r1cs_std::uint8::UInt8;
 use ark_relations::gr1cs::SynthesisError;
 
 use crate::bytes::pack_bytes_16;
-use crate::keccak::keccak256_fixed;
 use crate::keccak::sponge::to_bytes;
+use crate::keccak::{keccak256_fixed_with, DirectPermutation, PermutationBackend};
 
 /// Byte width of the spec 10.2 preimage.
 pub const PREIMAGE_LEN: usize = 285;
@@ -124,16 +124,20 @@ pub struct Signals<F: PrimeField> {
 /// values. Splitting it that way keeps the public-input decision in the
 /// relation, where the spec 10.1 argument for exactly two signals lives.
 pub fn compute<F: PrimeField>(ctx: &Context<F>) -> Result<Signals<F>, SynthesisError> {
+    compute_with(ctx, &mut DirectPermutation)
+}
+
+pub fn compute_with<F: PrimeField, B: PermutationBackend<F>>(
+    ctx: &Context<F>,
+    backend: &mut B,
+) -> Result<Signals<F>, SynthesisError> {
     let preimage = ctx.preimage();
-    let digest_bits = keccak256_fixed(&to_bytes(&preimage)?)?;
+    let digest_bits = keccak256_fixed_with(&to_bytes(&preimage)?, backend)?;
 
     // The digest as 32 bytes, then split into two 16-byte limbs. 16 bytes is
     // always below the BN254 modulus, so each packing is injective; 32 would
     // alias.
-    let digest: Vec<UInt8<F>> = digest_bits
-        .iter()
-        .map(|b| UInt8::from_bits_le(b))
-        .collect();
+    let digest: Vec<UInt8<F>> = digest_bits.iter().map(|b| UInt8::from_bits_le(b)).collect();
 
     Ok(Signals {
         hi: pack_bytes_16(&digest[..16])?,
@@ -245,20 +249,62 @@ mod tests {
         };
 
         let mutations: Vec<Statement> = vec![
-            Statement { instance_domain: [0x12; 32], ..native_sample() },
-            Statement { chain_id: 2, ..native_sample() },
-            Statement { escrow: [0x23; 20], ..native_sample() },
-            Statement { request_id: [0x34; 32], ..native_sample() },
-            Statement { row_index: 8, ..native_sample() },
-            Statement { intent_commitment: [0x45; 32], ..native_sample() },
-            Statement { bond_attempt: 4, ..native_sample() },
-            Statement { bond_start_block: 1001, ..native_sample() },
-            Statement { bond_deadline: 1181, ..native_sample() },
-            Statement { bonded_collector: [0x56; 20], ..native_sample() },
-            Statement { row_payout_asset: [0x01; 20], ..native_sample() },
-            Statement { row_payout_amount: [0x01; 32], ..native_sample() },
-            Statement { witness_block_number: 1101, ..native_sample() },
-            Statement { witness_block_hash: [0x67; 32], ..native_sample() },
+            Statement {
+                instance_domain: [0x12; 32],
+                ..native_sample()
+            },
+            Statement {
+                chain_id: 2,
+                ..native_sample()
+            },
+            Statement {
+                escrow: [0x23; 20],
+                ..native_sample()
+            },
+            Statement {
+                request_id: [0x34; 32],
+                ..native_sample()
+            },
+            Statement {
+                row_index: 8,
+                ..native_sample()
+            },
+            Statement {
+                intent_commitment: [0x45; 32],
+                ..native_sample()
+            },
+            Statement {
+                bond_attempt: 4,
+                ..native_sample()
+            },
+            Statement {
+                bond_start_block: 1001,
+                ..native_sample()
+            },
+            Statement {
+                bond_deadline: 1181,
+                ..native_sample()
+            },
+            Statement {
+                bonded_collector: [0x56; 20],
+                ..native_sample()
+            },
+            Statement {
+                row_payout_asset: [0x01; 20],
+                ..native_sample()
+            },
+            Statement {
+                row_payout_amount: [0x01; 32],
+                ..native_sample()
+            },
+            Statement {
+                witness_block_number: 1101,
+                ..native_sample()
+            },
+            Statement {
+                witness_block_hash: [0x67; 32],
+                ..native_sample()
+            },
         ];
         assert_eq!(mutations.len(), 14, "one case per context field");
 

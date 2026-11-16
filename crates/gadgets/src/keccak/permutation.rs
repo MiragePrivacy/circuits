@@ -29,6 +29,24 @@ use ark_relations::gr1cs::SynthesisError;
 /// 25 lanes of 64 bits.
 pub type State<F> = [[Boolean<F>; 64]; 25];
 
+/// Backend used by the sponge for each Keccak-f permutation.
+///
+/// The default implementation below emits the direct Boolean constraints.
+/// Experimental coprocessor backends can instead allocate the output state,
+/// record the input/output pair, and verify the entire batch once.
+pub trait PermutationBackend<F: PrimeField> {
+    fn permute(&mut self, state: State<F>) -> Result<State<F>, SynthesisError>;
+}
+
+#[derive(Default)]
+pub struct DirectPermutation;
+
+impl<F: PrimeField> PermutationBackend<F> for DirectPermutation {
+    fn permute(&mut self, state: State<F>) -> Result<State<F>, SynthesisError> {
+        keccak_f1600(state)
+    }
+}
+
 /// Rotation offsets, indexed by the rho/pi step order.
 const RHO: [u32; 24] = [
     1, 3, 6, 10, 15, 21, 28, 36, 45, 55, 2, 14, 27, 41, 56, 8, 25, 43, 62, 18, 39, 61, 20, 44,
@@ -124,8 +142,9 @@ pub fn keccak_f1600<F: PrimeField>(mut st: State<F>) -> Result<State<F>, Synthes
                 for b in 0..64 {
                     anded.push(not_next[b].clone() & &row[(j + 2) % 5][b]);
                 }
-                let anded: [Boolean<F>; 64] =
-                    anded.try_into().map_err(|_| SynthesisError::Unsatisfiable)?;
+                let anded: [Boolean<F>; 64] = anded
+                    .try_into()
+                    .map_err(|_| SynthesisError::Unsatisfiable)?;
                 st[(i * 5) + j] = xor_lane(&row[j], &anded)?;
             }
         }
@@ -181,7 +200,10 @@ mod tests {
         }
     }
 
-    fn alloc_state(cs: ark_relations::gr1cs::ConstraintSystemRef<Fr>, lanes: &[u64; 25]) -> State<Fr> {
+    fn alloc_state(
+        cs: ark_relations::gr1cs::ConstraintSystemRef<Fr>,
+        lanes: &[u64; 25],
+    ) -> State<Fr> {
         core::array::from_fn(|i| {
             core::array::from_fn(|b| {
                 Boolean::new_witness(cs.clone(), || Ok((lanes[i] >> b) & 1 == 1)).unwrap()
@@ -218,7 +240,9 @@ mod tests {
     fn permutation_matches_native_on_patterned_state() {
         let cs = ConstraintSystem::<Fr>::new_ref();
         let lanes: [u64; 25] = core::array::from_fn(|i| {
-            (i as u64).wrapping_mul(0x0123_4567_89ab_cdef).rotate_left(i as u32)
+            (i as u64)
+                .wrapping_mul(0x0123_4567_89ab_cdef)
+                .rotate_left(i as u32)
         });
         let out = keccak_f1600(alloc_state(cs.clone(), &lanes)).unwrap();
 

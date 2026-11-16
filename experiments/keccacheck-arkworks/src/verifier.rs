@@ -1,0 +1,855 @@
+//! Keccacheck GKR verifier gadget.
+//!
+//! Ported from the upstream native and gnark verifiers at commit `15f00e3`.
+
+use crate::poseidon2::SpongeVar;
+use ark_bn254::Fr;
+use ark_bn254_05::Fr as Fr05;
+use ark_ff::{AdditiveGroup, MontFp, One, Zero};
+use ark_r1cs_std::{GR1CSVar, alloc::AllocVar, boolean::Boolean, eq::EqGadget, fields::fp::FpVar};
+use ark_relations::gr1cs::{ConstraintSystemRef, SynthesisError};
+use std::{ops::Range, str::FromStr};
+
+const HALF: Fr =
+    MontFp!("10944121435919637611123202872628637544274182200208017171849102093287904247809");
+
+const ROUND_CONSTANTS: [u64; 24] = [
+    0x0000000000000001,
+    0x0000000000008082,
+    0x800000000000808a,
+    0x8000000080008000,
+    0x000000000000808b,
+    0x0000000080000001,
+    0x8000000080008081,
+    0x8000000000008009,
+    0x000000000000008a,
+    0x0000000000000088,
+    0x0000000080008009,
+    0x000000008000000a,
+    0x000000008000808b,
+    0x800000000000008b,
+    0x8000000000008089,
+    0x8000000000008003,
+    0x8000000000008002,
+    0x8000000000000080,
+    0x000000000000800a,
+    0x800000008000000a,
+    0x8000000080008081,
+    0x8000000000008080,
+    0x0000000080000001,
+    0x8000000080008008,
+];
+
+const RHO_OFFSETS: [usize; 25] = [
+    0, 1, 62, 28, 27, 36, 44, 6, 55, 20, 3, 10, 43, 25, 39, 41, 45, 15, 21, 8, 18, 2, 61, 56, 14,
+];
+
+const PI: [usize; 24] = [
+    10, 7, 11, 17, 18, 3, 5, 16, 8, 21, 24, 4, 15, 23, 19, 13, 12, 2, 20, 14, 22, 9, 6, 1,
+];
+
+type RoundClaims = (Vec<FpVar<Fr>>, Vec<FpVar<Fr>>);
+
+struct TranscriptVar {
+    sponge: SpongeVar,
+    proof: Vec<FpVar<Fr>>,
+    index: usize,
+}
+
+impl TranscriptVar {
+    fn new(proof: Vec<FpVar<Fr>>) -> Self {
+        Self {
+            sponge: SpongeVar::new(),
+            proof,
+            index: 0,
+        }
+    }
+
+    fn absorb(&mut self, value: &FpVar<Fr>) {
+        self.sponge.absorb(value);
+    }
+
+    fn generate(&mut self) -> FpVar<Fr> {
+        self.sponge.squeeze()
+    }
+
+    fn read(&mut self) -> Result<FpVar<Fr>, SynthesisError> {
+        let value = self
+            .proof
+            .get(self.index)
+            .cloned()
+            .ok_or(SynthesisError::Unsatisfiable)?;
+        self.index += 1;
+        self.sponge.absorb(&value);
+        Ok(value)
+    }
+
+    fn finish(self) -> Result<(), SynthesisError> {
+        if self.index == self.proof.len() {
+            Ok(())
+        } else {
+            Err(SynthesisError::Unsatisfiable)
+        }
+    }
+}
+
+fn xor(a: &FpVar<Fr>, b: &FpVar<Fr>) -> FpVar<Fr> {
+    let ab = a * b;
+    a + b - &ab - &ab
+}
+
+/// Enforces `left == right` and logs the constraint rows under `label`.
+///
+/// The log is side data: it adds no variables or constraints.
+fn enforce_named(
+    checks: &mut Vec<NamedCheck>,
+    label: &str,
+    left: &FpVar<Fr>,
+    right: &FpVar<Fr>,
+) -> Result<(), SynthesisError> {
+    #[cfg(test)]
+    if crate::testkit::hooks::check_removed(label) {
+        return Ok(());
+    }
+    let cs = left.cs().or(right.cs());
+    let start = cs.num_constraints();
+    left.enforce_equal(right)?;
+    checks.push(NamedCheck {
+        label: label.to_owned(),
+        rows: start..cs.num_constraints(),
+    });
+    Ok(())
+}
+
+pub(crate) fn eval_eq(r: &[FpVar<Fr>]) -> Vec<FpVar<Fr>> {
+    if r.is_empty() {
+        return vec![FpVar::Constant(Fr::one())];
+    }
+    let mut out = vec![FpVar::Constant(Fr::one()) - &r[0], r[0].clone()];
+    for ri in &r[1..] {
+        let one_minus = FpVar::Constant(Fr::one()) - ri;
+        let mut next = Vec::with_capacity(out.len() * 2);
+        for value in out {
+            let lo = &value * &one_minus;
+            let hi = value - &lo;
+            next.push(lo);
+            next.push(hi);
+        }
+        out = next;
+    }
+    out
+}
+
+pub(crate) fn eval_mle_with_eq(mle: &[FpVar<Fr>], eq: &[FpVar<Fr>]) -> FpVar<Fr> {
+    assert_eq!(mle.len(), eq.len());
+    // One flat sum: a running fold leaves a chain of partial sums that LC
+    // inlining expands quadratically in the table size.
+    mle.iter().zip(eq).map(|(a, b)| a * b).sum()
+}
+
+fn eval_mle(mle: &[FpVar<Fr>], r: &[FpVar<Fr>]) -> FpVar<Fr> {
+    assert_eq!(mle.len(), 1usize << r.len());
+    let mut coeffs = mle.to_vec();
+    for ri in r {
+        let half = coeffs.len() / 2;
+        coeffs = (0..half)
+            .map(|j| &coeffs[j] + ri * (&coeffs[half + j] - &coeffs[j]))
+            .collect();
+    }
+    coeffs[0].clone()
+}
+
+fn eq(a: &[FpVar<Fr>], b: &[FpVar<Fr>]) -> FpVar<Fr> {
+    assert_eq!(a.len(), b.len());
+    a.iter()
+        .zip(b)
+        .fold(FpVar::Constant(Fr::one()), |acc, (x, y)| {
+            let xy = x * y;
+            let term = &xy + &xy + FpVar::Constant(Fr::one()) - x - y;
+            acc * term
+        })
+}
+
+fn prefix_eq(a: &[FpVar<Fr>], b: &[FpVar<Fr>], prefix: usize) -> FpVar<Fr> {
+    eq(&a[..prefix], &b[..prefix])
+}
+
+fn rot_from_eq(
+    lane: usize,
+    eq_a_suffix: &[FpVar<Fr>],
+    eq_b_suffix: &[FpVar<Fr>],
+    prefix: &FpVar<Fr>,
+) -> FpVar<Fr> {
+    let mut rotated = vec![FpVar::Constant(Fr::zero()); eq_a_suffix.len()];
+    let instances = eq_a_suffix.len() / 64;
+    for instance in 0..instances {
+        for bit in 0..64 {
+            rotated[instance * 64 + bit] =
+                eq_a_suffix[instance * 64 + (bit + RHO_OFFSETS[lane]) % 64].clone();
+        }
+    }
+    prefix * eval_mle_with_eq(&rotated, eq_b_suffix)
+}
+
+fn verify_sumcheck<const DEGREE: usize>(
+    transcript: &mut TranscriptVar,
+    num_vars: usize,
+    mut claim: FpVar<Fr>,
+) -> Result<(FpVar<Fr>, Vec<FpVar<Fr>>), SynthesisError> {
+    let mut challenges = Vec::with_capacity(num_vars);
+    #[cfg(test)]
+    let sumcheck = crate::testkit::hooks::next_sumcheck();
+    for _round in 0..num_vars {
+        #[cfg(test)]
+        if let Some(value) = crate::testkit::hooks::rebased_claim(sumcheck, _round) {
+            claim = FpVar::new_witness(claim.cs(), || Ok(value))?;
+        }
+        let mut p = Vec::with_capacity(DEGREE);
+        for _ in 0..DEGREE {
+            p.push(transcript.read()?);
+        }
+        let sum = p
+            .iter()
+            .cloned()
+            .fold(FpVar::Constant(Fr::zero()), |acc, x| acc + x);
+        let p0 = (claim - sum) * HALF;
+        let r = transcript.generate();
+        challenges.push(r.clone());
+        let mut acc = p[DEGREE - 1].clone();
+        for j in (0..DEGREE - 1).rev() {
+            acc = &p[j] + &r * acc;
+        }
+        claim = p0 + r * acc;
+    }
+    Ok((claim, challenges))
+}
+
+fn add_col(j: usize, add: usize) -> usize {
+    let col = j % 5;
+    let row = j - col;
+    (col + add) % 5 + row
+}
+
+fn strip_pi(pi: &[FpVar<Fr>]) -> Vec<FpVar<Fr>> {
+    let mut rho = pi.to_vec();
+    let mut last = 1usize;
+    for target in PI {
+        rho[last] = pi[target].clone();
+        last = target;
+    }
+    rho
+}
+
+fn verify_round(
+    transcript: &mut TranscriptVar,
+    checks: &mut Vec<NamedCheck>,
+    num_vars: usize,
+    alpha: &[FpVar<Fr>],
+    beta: &mut [FpVar<Fr>],
+    sum: FpVar<Fr>,
+    rc: u64,
+    round: usize,
+) -> Result<RoundClaims, SynthesisError> {
+    let (ve, vrs_iota) = verify_sumcheck::<3>(transcript, num_vars, sum)?;
+    let chi_00 = transcript.read()?;
+    let chi_rlc = transcript.read()?;
+    let e_eq = eq(alpha, &vrs_iota);
+    let rc_bits = (0..64)
+        .map(|bit| FpVar::Constant(Fr::from((rc >> bit) & 1)))
+        .collect::<Vec<_>>();
+    let e_rc = eval_mle(&rc_bits, &vrs_iota[num_vars - 6..]);
+    let expected = e_eq * (&beta[0] * xor(&chi_00, &e_rc) + &chi_rlc);
+    enforce_named(checks, &format!("round {round}: iota"), &expected, &ve)?;
+
+    let x = transcript.generate();
+    let y = transcript.generate();
+    beta[0] *= &x;
+    for value in &mut beta[1..] {
+        *value *= &y;
+    }
+    let expected_sum = &beta[0] * &chi_00 + &y * &chi_rlc;
+
+    let (ve, vrs_chi) = verify_sumcheck::<4>(transcript, num_vars, expected_sum)?;
+    let mut pi = Vec::with_capacity(25);
+    for _ in 0..25 {
+        pi.push(transcript.read()?);
+    }
+    let e_eq = eq(&vrs_iota, &vrs_chi);
+    let mut checksum = FpVar::Constant(Fr::zero());
+    for i in 0..25 {
+        let chi = xor(
+            &pi[i],
+            &((FpVar::Constant(Fr::one()) - &pi[add_col(i, 1)]) * &pi[add_col(i, 2)]),
+        );
+        checksum += &e_eq * &beta[i] * chi;
+    }
+    enforce_named(checks, &format!("round {round}: chi"), &checksum, &ve)?;
+
+    let rho = strip_pi(&pi);
+    let mut expected_sum = FpVar::Constant(Fr::zero());
+    for i in 0..25 {
+        beta[i] = transcript.generate();
+        expected_sum += &beta[i] * &rho[i];
+    }
+    let (ve, vrs_rho) = verify_sumcheck::<2>(transcript, num_vars, expected_sum)?;
+    let mut theta = Vec::with_capacity(25);
+    for _ in 0..25 {
+        theta.push(transcript.read()?);
+    }
+    let prefix = num_vars - 6;
+    let eq_chi_suffix = eval_eq(&vrs_chi[prefix..]);
+    let eq_rho_suffix = eval_eq(&vrs_rho[prefix..]);
+    let prefix_value = prefix_eq(&vrs_chi, &vrs_rho, prefix);
+    checksum = FpVar::Constant(Fr::zero());
+    for i in 0..25 {
+        let rotation = rot_from_eq(i, &eq_chi_suffix, &eq_rho_suffix, &prefix_value);
+        checksum += &beta[i] * rotation * &theta[i];
+    }
+    enforce_named(checks, &format!("round {round}: rho"), &checksum, &ve)?;
+
+    let theta_xor_base = theta
+        .iter()
+        .map(|value| FpVar::Constant(Fr::one()) - value - value)
+        .collect::<Vec<_>>();
+    expected_sum = FpVar::Constant(Fr::zero());
+    for i in 0..25 {
+        beta[i] = transcript.generate();
+        expected_sum += &beta[i] * &theta_xor_base[i];
+    }
+
+    let (ve, vrs_theta) = verify_sumcheck::<3>(transcript, num_vars, expected_sum)?;
+    let mut ai = Vec::with_capacity(5);
+    let mut d = Vec::with_capacity(5);
+    for _ in 0..5 {
+        ai.push(transcript.read()?);
+    }
+    for _ in 0..5 {
+        d.push(transcript.read()?);
+    }
+    let e_eq = eq(&vrs_rho, &vrs_theta);
+    checksum = FpVar::Constant(Fr::zero());
+    for j in 0..5 {
+        checksum += &e_eq * &d[j] * &ai[j];
+    }
+    enforce_named(checks, &format!("round {round}: theta"), &checksum, &ve)?;
+
+    expected_sum = FpVar::Constant(Fr::zero());
+    let mut beta_d = Vec::with_capacity(5);
+    for value in &d {
+        let challenge = transcript.generate();
+        expected_sum += &challenge * value;
+        beta_d.push(challenge);
+    }
+    let (ve, vrs_d) = verify_sumcheck::<3>(transcript, num_vars, expected_sum)?;
+    let mut c = Vec::with_capacity(5);
+    let mut rot_c = Vec::with_capacity(5);
+    for _ in 0..5 {
+        c.push(transcript.read()?);
+    }
+    for _ in 0..5 {
+        rot_c.push(transcript.read()?);
+    }
+    let e_eq = eq(&vrs_theta, &vrs_d);
+    checksum = FpVar::Constant(Fr::zero());
+    for j in 0..5 {
+        checksum += &beta_d[j] * &e_eq * &c[(j + 4) % 5] * &rot_c[(j + 1) % 5];
+    }
+    enforce_named(checks, &format!("round {round}: theta_d"), &checksum, &ve)?;
+
+    expected_sum = FpVar::Constant(Fr::zero());
+    let mut beta_c = Vec::with_capacity(5);
+    let mut beta_rot_c = Vec::with_capacity(5);
+    for value in &c {
+        let challenge = transcript.generate();
+        expected_sum += &challenge * value;
+        beta_c.push(challenge);
+    }
+    for value in &rot_c {
+        let challenge = transcript.generate();
+        expected_sum += &challenge * value;
+        beta_rot_c.push(challenge);
+    }
+    let (ve, vrs_c) = verify_sumcheck::<6>(transcript, num_vars, expected_sum)?;
+    let mut a = Vec::with_capacity(25);
+    for _ in 0..25 {
+        a.push(transcript.read()?);
+    }
+    let e_eq = eq(&vrs_d, &vrs_c);
+    let eq_d_suffix = eval_eq(&vrs_d[prefix..]);
+    let eq_c_suffix = eval_eq(&vrs_c[prefix..]);
+    let prefix_value = prefix_eq(&vrs_d, &vrs_c, prefix);
+    let e_rot = rot_from_eq(1, &eq_d_suffix, &eq_c_suffix, &prefix_value);
+    checksum = FpVar::Constant(Fr::zero());
+    for j in 0..5 {
+        let product = (0..5).fold(FpVar::Constant(Fr::one()), |acc, i| acc * &a[i * 5 + j]);
+        checksum += (&beta_c[j] * &e_eq + &beta_rot_c[j] * &e_rot) * product;
+    }
+    enforce_named(checks, &format!("round {round}: theta_c"), &checksum, &ve)?;
+
+    expected_sum = FpVar::Constant(Fr::zero());
+    for (i, value) in ai.iter().enumerate() {
+        let challenge = transcript.generate();
+        for row in 0..5 {
+            beta[row * 5 + i] *= &challenge;
+        }
+        expected_sum += challenge * value;
+    }
+    let mut beta_a = Vec::with_capacity(25);
+    for value in &a {
+        let challenge = transcript.generate();
+        expected_sum += &challenge * value;
+        beta_a.push(challenge);
+    }
+    let (ve, vrs_a) = verify_sumcheck::<2>(transcript, num_vars, expected_sum)?;
+    let mut iota = Vec::with_capacity(25);
+    for _ in 0..25 {
+        iota.push(transcript.read()?);
+    }
+    let e_eq_ai = eq(&vrs_theta, &vrs_a);
+    let e_eq_a = eq(&vrs_c, &vrs_a);
+    checksum = FpVar::Constant(Fr::zero());
+    for j in 0..25 {
+        checksum += &beta[j] * &e_eq_ai * &iota[j] + &beta_a[j] * &e_eq_a * &iota[j];
+    }
+    enforce_named(checks, &format!("round {round}: theta_a"), &checksum, &ve)?;
+    for value in &mut iota {
+        *value = (FpVar::Constant(Fr::one()) - &*value) * HALF;
+    }
+    Ok((vrs_a, iota))
+}
+
+/// Smallest batch accepted by the verifier.
+///
+/// A singleton batch derives no output challenge, so the transcript would
+/// absorb nothing about the claimed states before `beta` is squeezed. Two
+/// instances derive a single-element `r`, whose collisions are reachable.
+pub const MIN_INSTANCES: usize = 4;
+
+/// Words packed into each absorbed field element; 192 bits fit injectively.
+const WORDS_PER_ELEMENT: usize = 3;
+
+const STATEMENT_TAG: u128 = u128::from_le_bytes(*b"mirage/kcck/stmt");
+
+/// Derives the output challenge from the full claimed statement.
+///
+/// Both slices are lane-major (`[lane][instance]`). Absorbing the inputs as
+/// well as the outputs binds every later challenge to the whole statement.
+pub fn derive_r_native(input: &[u64], output: &[u64], log_instances: usize) -> Vec<Fr05> {
+    assert!(
+        1 << log_instances >= MIN_INSTANCES,
+        "Keccacheck batch below MIN_INSTANCES"
+    );
+    let word = Fr05::from(1u128 << 64);
+    let mut sponge = gkr::transcript::Sponge::new();
+    sponge.absorb(Fr05::from(STATEMENT_TAG));
+    sponge.absorb(Fr05::from(1u64 << log_instances));
+    for chunk in input
+        .chunks(WORDS_PER_ELEMENT)
+        .chain(output.chunks(WORDS_PER_ELEMENT))
+    {
+        let packed = chunk.iter().rev().fold(Fr05::from(0u64), |acc, value| {
+            acc * word + Fr05::from(*value)
+        });
+        sponge.absorb(packed);
+    }
+    (0..log_instances).map(|_| sponge.squeeze()).collect()
+}
+
+pub(crate) fn derive_r_var(
+    input_bits: &[FpVar<Fr>],
+    output_bits: &[FpVar<Fr>],
+    log_instances: usize,
+) -> Vec<FpVar<Fr>> {
+    assert!(
+        1 << log_instances >= MIN_INSTANCES,
+        "Keccacheck batch below MIN_INSTANCES"
+    );
+    let mut sponge = SpongeVar::new();
+    sponge.absorb(&FpVar::Constant(Fr::from(STATEMENT_TAG)));
+    sponge.absorb(&FpVar::Constant(Fr::from(1u64 << log_instances)));
+    for chunk in input_bits
+        .chunks(64 * WORDS_PER_ELEMENT)
+        .chain(output_bits.chunks(64 * WORDS_PER_ELEMENT))
+    {
+        let mut power = Fr::one();
+        let packed: FpVar<Fr> = chunk
+            .iter()
+            .map(|bit| {
+                let term = bit * power;
+                power.double_in_place();
+                term
+            })
+            .sum();
+        sponge.absorb(&packed);
+    }
+    (0..log_instances).map(|_| sponge.squeeze()).collect()
+}
+
+pub struct Witness {
+    pub proof: Vec<Fr>,
+    pub input: Vec<u64>,
+    pub output: Vec<u64>,
+}
+
+/// One named verifier equality and the constraint rows it produced.
+#[derive(Clone, Debug)]
+pub struct NamedCheck {
+    pub label: String,
+    pub rows: Range<usize>,
+}
+
+#[derive(Clone, Debug)]
+pub struct VerificationProfile {
+    pub allocation: usize,
+    pub output_binding: usize,
+    pub output_reduction: usize,
+    pub rounds: usize,
+    pub input_binding: usize,
+    pub total: usize,
+    pub checks: Vec<NamedCheck>,
+}
+
+pub fn verify_witness(
+    cs: ConstraintSystemRef<Fr>,
+    witness: &Witness,
+) -> Result<(), SynthesisError> {
+    verify_witness_profile(cs, witness).map(|_| ())
+}
+
+pub fn verify_witness_profile(
+    cs: ConstraintSystemRef<Fr>,
+    witness: &Witness,
+) -> Result<VerificationProfile, SynthesisError> {
+    let start = cs.num_constraints();
+    let instances = witness.input.len() / 25;
+    assert!(instances.is_power_of_two() && instances >= MIN_INSTANCES);
+    assert_eq!(witness.output.len(), 25 * instances);
+
+    let proof = witness
+        .proof
+        .iter()
+        .map(|value| FpVar::new_witness(cs.clone(), || Ok(*value)))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut input_bits = Vec::with_capacity(witness.input.len() * 64);
+    for value in &witness.input {
+        for bit in 0..64 {
+            input_bits.push(Boolean::new_witness(cs.clone(), || {
+                Ok((value >> bit) & 1 == 1)
+            })?);
+        }
+    }
+    let mut output_bits = Vec::with_capacity(witness.output.len() * 64);
+    for value in &witness.output {
+        for bit in 0..64 {
+            output_bits.push(Boolean::new_witness(cs.clone(), || {
+                Ok((value >> bit) & 1 == 1)
+            })?);
+        }
+    }
+    let after_allocation = cs.num_constraints();
+    verify_allocated(
+        cs,
+        proof,
+        &input_bits,
+        &output_bits,
+        instances,
+        start,
+        after_allocation,
+    )
+}
+
+/// Verify a Keccacheck proof against state bits owned by the calling circuit.
+///
+/// Both bit slices use `[lane][instance][little-endian bit]` order. This is the
+/// integration boundary needed by Mirage's sponge: verified output bits can be
+/// reused directly as the next permutation's input state or as digest bits.
+pub fn verify_boolean_batch(
+    cs: ConstraintSystemRef<Fr>,
+    proof_values: &[Fr],
+    input_bits: &[Boolean<Fr>],
+    output_bits: &[Boolean<Fr>],
+) -> Result<VerificationProfile, SynthesisError> {
+    assert_eq!(input_bits.len(), output_bits.len());
+    assert_eq!(input_bits.len() % (25 * 64), 0);
+    let instances = input_bits.len() / (25 * 64);
+    assert!(instances.is_power_of_two() && instances >= MIN_INSTANCES);
+    let start = cs.num_constraints();
+    let proof = proof_values
+        .iter()
+        .map(|value| FpVar::new_witness(cs.clone(), || Ok(*value)))
+        .collect::<Result<Vec<_>, _>>()?;
+    let after_allocation = cs.num_constraints();
+    verify_allocated(
+        cs,
+        proof,
+        input_bits,
+        output_bits,
+        instances,
+        start,
+        after_allocation,
+    )
+}
+
+fn verify_allocated(
+    cs: ConstraintSystemRef<Fr>,
+    proof: Vec<FpVar<Fr>>,
+    input_booleans: &[Boolean<Fr>],
+    output_booleans: &[Boolean<Fr>],
+    instances: usize,
+    start: usize,
+    after_allocation: usize,
+) -> Result<VerificationProfile, SynthesisError> {
+    #[cfg(test)]
+    crate::testkit::hooks::reset_sumchecks();
+    let mut checks = Vec::new();
+    let log_instances = instances.ilog2() as usize;
+    let num_vars = log_instances + 6;
+    let input_bits = input_booleans
+        .iter()
+        .cloned()
+        .map(FpVar::from)
+        .collect::<Vec<_>>();
+    let output_bits = output_booleans
+        .iter()
+        .cloned()
+        .map(FpVar::from)
+        .collect::<Vec<_>>();
+    let powers = (0..64).map(|i| Fr::from(1u64 << i)).collect::<Vec<_>>();
+    let output = output_bits
+        .chunks_exact(64)
+        .map(|bits| {
+            bits.iter().zip(&powers).map(|(bit, power)| bit * *power).sum()
+        })
+        .collect::<Vec<_>>();
+
+    let r = derive_r_var(&input_bits, &output_bits, log_instances);
+    let after_output_binding = cs.num_constraints();
+    let mut transcript = TranscriptVar::new(proof);
+    for challenge in &r {
+        transcript.absorb(challenge);
+    }
+    let mut beta = (0..25).map(|_| transcript.generate()).collect::<Vec<_>>();
+    let eq_r = eval_eq(&r);
+    let mut expected_sum = FpVar::Constant(Fr::zero());
+    for i in 0..25 {
+        expected_sum +=
+            &beta[i] * eval_mle_with_eq(&output[i * instances..(i + 1) * instances], &eq_r);
+    }
+    let mut sum = transcript.read()?;
+    enforce_named(&mut checks, "output sum", &sum, &expected_sum)?;
+
+    let (claim, r_x) = verify_sumcheck::<2>(&mut transcript, log_instances, sum)?;
+    let words_r_x = transcript.read()?;
+    enforce_named(
+        &mut checks,
+        "output word reduction",
+        &claim,
+        &(&words_r_x * eq(&r, &r_x)),
+    )?;
+
+    let (claim, r_y) = verify_sumcheck::<2>(&mut transcript, 6, words_r_x)?;
+    let bit_eval = transcript.read()?;
+    let powers = (0..64)
+        .map(|i| FpVar::Constant(Fr::from(1u64 << i)))
+        .collect::<Vec<_>>();
+    enforce_named(
+        &mut checks,
+        "output bit reduction",
+        &claim,
+        &(eval_mle(&powers, &r_y) * &bit_eval),
+    )?;
+    sum = bit_eval;
+    let mut alpha = r_x;
+    alpha.extend(r_y);
+    let after_output_reduction = cs.num_constraints();
+
+    let mut iota = Vec::new();
+    for round in (0..24).rev() {
+        (alpha, iota) = verify_round(
+            &mut transcript,
+            &mut checks,
+            num_vars,
+            &alpha,
+            &mut beta,
+            sum.clone(),
+            ROUND_CONSTANTS[round],
+            round,
+        )?;
+        if round != 0 {
+            sum = FpVar::Constant(Fr::zero());
+            for i in 0..25 {
+                beta[i] = transcript.generate();
+                sum += &beta[i] * &iota[i];
+            }
+        }
+    }
+    let after_rounds = cs.num_constraints();
+
+    let eq_alpha = eval_eq(&alpha);
+    for (i, iota_value) in iota.iter().enumerate() {
+        let start = i * instances * 64;
+        let end = start + instances * 64;
+        enforce_named(
+            &mut checks,
+            &format!("input lane {i}"),
+            &eval_mle_with_eq(&input_bits[start..end], &eq_alpha),
+            iota_value,
+        )?;
+    }
+    transcript.finish()?;
+    let total = cs.num_constraints();
+    Ok(VerificationProfile {
+        allocation: after_allocation - start,
+        output_binding: after_output_binding - after_allocation,
+        output_reduction: after_output_reduction - after_output_binding,
+        rounds: after_rounds - after_output_reduction,
+        input_binding: total - after_rounds,
+        total: total - start,
+        checks,
+    })
+}
+
+pub fn make_witness(instances: usize) -> Witness {
+    assert!(instances.is_power_of_two() && instances >= MIN_INSTANCES);
+    let data = (0..instances * 25).map(|i| i as u64).collect::<Vec<_>>();
+    make_witness_from_data(&data)
+}
+
+pub fn proof_elements(instances: usize) -> usize {
+    assert!(instances.is_power_of_two() && instances >= MIN_INSTANCES);
+    6_255 + 554 * instances.ilog2() as usize
+}
+
+pub fn make_witness_from_data(data: &[u64]) -> Witness {
+    assert_eq!(data.len() % 25, 0);
+    let instances = data.len() / 25;
+    assert!(instances.is_power_of_two() && instances >= MIN_INSTANCES);
+    let mut input = vec![0u64; instances * 25];
+    let mut output = vec![0u64; instances * 25];
+    for instance in 0..instances {
+        let mut state: [u64; 25] = core::array::from_fn(|lane| data[instance * 25 + lane]);
+        for lane in 0..25 {
+            input[lane * instances + instance] = state[lane];
+        }
+        keccak::f1600(&mut state);
+        for lane in 0..25 {
+            output[lane * instances + instance] = state[lane];
+        }
+    }
+    let r = derive_r_native(&input, &output, instances.ilog2() as usize);
+    let (proof_05, proved_input, proved_output) = gkr::keccacheck_og::prover::prove(&data, r);
+    assert_eq!(proved_input, input);
+    assert_eq!(proved_output, output);
+    let proof = proof_05
+        .iter()
+        .map(|value| {
+            Fr::from_str(&value.to_string())
+                .expect("BN254 scalar converts across arkworks versions")
+        })
+        .collect();
+    Witness {
+        proof,
+        input,
+        output,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ark_relations::gr1cs::ConstraintSystem;
+
+    fn satisfied(witness: &Witness) -> bool {
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        verify_witness(cs.clone(), witness).unwrap();
+        cs.is_satisfied().unwrap()
+    }
+
+    #[test]
+    fn minimum_batch_proof_satisfies() {
+        let witness = make_witness(MIN_INSTANCES);
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        verify_witness(cs.clone(), &witness).unwrap();
+        assert!(
+            cs.is_satisfied().unwrap(),
+            "{:?}",
+            cs.which_is_unsatisfied()
+        );
+    }
+
+    #[test]
+    fn altered_output_is_rejected() {
+        let mut witness = make_witness(MIN_INSTANCES);
+        witness.output[0] ^= 1;
+        assert!(!satisfied(&witness));
+    }
+
+    #[test]
+    fn altered_input_is_rejected() {
+        let mut witness = make_witness(MIN_INSTANCES);
+        witness.input[0] ^= 1;
+        assert!(!satisfied(&witness));
+    }
+
+    #[test]
+    fn altered_proof_is_rejected() {
+        let mut witness = make_witness(MIN_INSTANCES);
+        witness.proof[0] += Fr::one();
+        assert!(!satisfied(&witness));
+    }
+
+    #[test]
+    #[should_panic(expected = "instances >= MIN_INSTANCES")]
+    fn singleton_batch_is_refused() {
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        let bits = vec![Boolean::FALSE; 25 * 64];
+        let _ = verify_boolean_batch(cs, &[], &bits, &bits);
+    }
+
+    #[test]
+    fn statement_challenge_binds_every_input_and_output_word() {
+        let witness = make_witness(MIN_INSTANCES);
+        let log_instances = MIN_INSTANCES.ilog2() as usize;
+        let r = derive_r_native(&witness.input, &witness.output, log_instances);
+        for word in 0..witness.input.len() {
+            let mut input = witness.input.clone();
+            input[word] ^= 1 << 63;
+            assert_ne!(derive_r_native(&input, &witness.output, log_instances), r);
+            let mut output = witness.output.clone();
+            output[word] ^= 1 << 63;
+            assert_ne!(derive_r_native(&witness.input, &output, log_instances), r);
+        }
+    }
+
+    /// A short kernel vector of the 25 `beta` constants a fresh transcript
+    /// yields when nothing is absorbed. It forged singleton outputs before
+    /// singleton batches were refused and the statement was absorbed.
+    #[test]
+    fn beta_kernel_shift_is_rejected() {
+        const DELTA: [i64; 25] = [
+            158, 268, -238, 486, 15, 78, -235, 18, 178, 774, -62, -39, 487, -49, 214, 552, 353,
+            -26, -460, 151, -171, -44, 174, 173, -145,
+        ];
+        let mut data = vec![0u64; 25 * MIN_INSTANCES];
+        for lane in 0..25 {
+            data[lane] = 7 + lane as u64;
+        }
+        let mut witness = make_witness_from_data(&data);
+        assert!(satisfied(&witness));
+        for (lane, delta) in DELTA.iter().enumerate() {
+            let word = &mut witness.output[lane * MIN_INSTANCES];
+            *word = word.checked_add_signed(*delta).unwrap();
+        }
+        assert!(!satisfied(&witness));
+    }
+
+    #[test]
+    fn proof_length_formula_matches_native_prover() {
+        for instances in [4, 8, 16, 32, 64, 128] {
+            assert_eq!(
+                make_witness(instances).proof.len(),
+                proof_elements(instances)
+            );
+        }
+    }
+}

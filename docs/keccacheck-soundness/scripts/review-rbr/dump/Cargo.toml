@@ -1,0 +1,15 @@
+[package]
+name = "dump"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+mirage-keccacheck-arkworks = { path = "../../../../../experiments/keccacheck-arkworks" }
+ark-relations = { version = "0.6", features = ["std"] }
+ark-bn254 = { version = "0.6", features = ["std"] }
+
+[profile.dev]
+opt-level = 1

@@ -21,11 +21,11 @@ use ark_r1cs_std::eq::EqGadget;
 use ark_r1cs_std::fields::fp::FpVar;
 use ark_r1cs_std::fields::FieldVar;
 use ark_r1cs_std::select::CondSelectGadget;
-use ark_r1cs_std::GR1CSVar;
 use ark_r1cs_std::uint8::UInt8;
+use ark_r1cs_std::GR1CSVar;
 use ark_relations::gr1cs::SynthesisError;
 
-use crate::bytes::{one_hot, select_byte_with};
+use crate::bytes::{one_hot_in_range, select_byte_with};
 
 /// The two flag bits of a hex-prefix path.
 pub struct Flags<F: PrimeField> {
@@ -88,9 +88,30 @@ pub fn nibble_at<F: PrimeField>(
     buf: &[UInt8<F>],
     index: &FpVar<F>,
 ) -> Result<FpVar<F>, SynthesisError> {
+    nibble_at_with(buf, index, &Boolean::FALSE)
+}
+
+/// [`nibble_at`], additionally asserting the read lands inside `buf` when
+/// `active`.
+///
+/// Without the assertion a prover can supply the all-zero selector for an index
+/// that *is* in range, so the nibble reads zero and any equality against it
+/// passes. That is a live forgery wherever the nibble drives the traversal:
+/// following child 0 instead of the key's actual nibble, or matching an
+/// extension path against zeros. Range-constraining the index does not help,
+/// because the suppressed read is at an in-range index.
+///
+/// Speculative callers pass a false `active`: a path-match iteration past
+/// `path_nibbles`, or an unselected leaf layout, legitimately reads out of
+/// range.
+pub fn nibble_at_with<F: PrimeField>(
+    buf: &[UInt8<F>],
+    index: &FpVar<F>,
+    active: &Boolean<F>,
+) -> Result<FpVar<F>, SynthesisError> {
     // byte = index / 2, high half when index is even.
     let (byte_index, remainder) = halve_with_remainder(index)?;
-    let sel = one_hot(&byte_index, buf.len())?;
+    let sel = one_hot_in_range(&byte_index, buf.len(), active)?;
     let byte = select_byte_with(buf, &sel)?;
     let bits = byte.to_bits_le()?;
 
@@ -158,10 +179,26 @@ mod tests {
 
     #[test]
     fn flags_match_the_yellow_paper() {
-        assert_eq!(flags_of(hex_prefix(&[], false)[0]), (false, false), "even extension");
-        assert_eq!(flags_of(hex_prefix(&[0xa], false)[0]), (false, true), "odd extension");
-        assert_eq!(flags_of(hex_prefix(&[], true)[0]), (true, false), "even leaf");
-        assert_eq!(flags_of(hex_prefix(&[0xa], true)[0]), (true, true), "odd leaf");
+        assert_eq!(
+            flags_of(hex_prefix(&[], false)[0]),
+            (false, false),
+            "even extension"
+        );
+        assert_eq!(
+            flags_of(hex_prefix(&[0xa], false)[0]),
+            (false, true),
+            "odd extension"
+        );
+        assert_eq!(
+            flags_of(hex_prefix(&[], true)[0]),
+            (true, false),
+            "even leaf"
+        );
+        assert_eq!(
+            flags_of(hex_prefix(&[0xa], true)[0]),
+            (true, true),
+            "odd leaf"
+        );
     }
 
     #[test]

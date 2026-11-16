@@ -78,14 +78,15 @@ pub fn log_item(emitter: &[u8; 20], topics: &[Vec<u8>], data: &[u8]) -> Vec<u8> 
 }
 
 /// A canonical ERC-20 Transfer log.
-pub fn transfer_log(token: &[u8; 20], from: &[u8; 20], to: &[u8; 20], amount: &[u8; 32]) -> Vec<u8> {
+pub fn transfer_log(
+    token: &[u8; 20],
+    from: &[u8; 20],
+    to: &[u8; 20],
+    amount: &[u8; 32],
+) -> Vec<u8> {
     log_item(
         token,
-        &[
-            transfer_topic0().to_vec(),
-            addr_topic(from),
-            addr_topic(to),
-        ],
+        &[transfer_topic0().to_vec(), addr_topic(from), addr_topic(to)],
         amount,
     )
 }
@@ -136,7 +137,12 @@ fn cs() -> ConstraintSystemRef<Fr> {
     ConstraintSystem::<Fr>::new_ref()
 }
 
-fn intent(token: &[u8; 20], recipient: &[u8; 20], amt: &[u8; 32], c: ConstraintSystemRef<Fr>) -> Intent<Fr> {
+fn intent(
+    token: &[u8; 20],
+    recipient: &[u8; 20],
+    amt: &[u8; 32],
+    c: ConstraintSystemRef<Fr>,
+) -> Intent<Fr> {
     Intent {
         token: alloc_bounded(c.clone(), token, 20).unwrap(),
         recipient: alloc_bounded(c.clone(), recipient, 20).unwrap(),
@@ -250,7 +256,10 @@ pub fn fixtures_are_well_formed() {
 
     let (r, _, _) = genuine();
     assert_eq!(r[0], 0x02, "typed prefix");
-    assert!(r.len() < TEST_RECEIPT_BYTES, "fixture exceeds the test bound");
+    assert!(
+        r.len() < TEST_RECEIPT_BYTES,
+        "fixture exceeds the test bound"
+    );
 
     // logsBloom is 256 bytes, so its RLP header is 0xb9 0x01 0x00.
     let legacy = receipt(1, &[], None);
@@ -567,6 +576,65 @@ fn single_log_adversarial_suite() {
     run_forgeries::<R>();
 }
 
+/// The finite-layout implementation must preserve the complete single-log
+/// relation, including every adversarial rejection case.
+#[test]
+fn fixed_layout_adversarial_suite() {
+    use super::log::Erc20FixedLayout as R;
+    accepts_genuine_receipt::<R>();
+    accepts_every_supported_envelope::<R>();
+    accepts_any_sender::<R>();
+    run_forgeries::<R>();
+}
+
+#[test]
+fn fixed_layout_accepts_every_gas_width() {
+    let amt = amount(77);
+    let log = transfer_log(&TOKEN, &SENDER, &RECIPIENT, &amt);
+    for gas_total in 1usize..=9 {
+        let encoded_gas = if gas_total == 1 {
+            vec![0x7f] // canonical bare byte
+        } else {
+            let width = gas_total - 1;
+            let mut item = vec![0x80 + width as u8];
+            item.push(if width == 1 { 0x80 } else { 0x01 });
+            item.resize(gas_total, 0);
+            item
+        };
+        let payload = enc_list(&[
+            enc_str(&[1]),
+            encoded_gas,
+            enc_str(&[0u8; 256]),
+            enc_list(std::slice::from_ref(&log)),
+        ]);
+        for envelope in [None, Some(1u8), Some(2), Some(3), Some(4)] {
+            let mut receipt = envelope.into_iter().collect::<Vec<_>>();
+            receipt.extend_from_slice(&payload);
+            assert!(
+                accepts_genuine_intent::<super::log::Erc20FixedLayout>(&receipt, 0, &amt),
+                "rejected gas width {gas_total}, envelope {envelope:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn fixed_layout_rejects_nonminimal_one_byte_gas() {
+    let amt = amount(77);
+    let log = transfer_log(&TOKEN, &SENDER, &RECIPIENT, &amt);
+    let payload = enc_list(&[
+        enc_str(&[1]),
+        vec![0x81, 0x7f], // must be encoded as bare 0x7f
+        enc_str(&[0u8; 256]),
+        enc_list(&[log]),
+    ]);
+    let mut receipt = vec![0x02];
+    receipt.extend_from_slice(&payload);
+    assert!(!accepts_genuine_intent::<super::log::Erc20FixedLayout>(
+        &receipt, 0, &amt
+    ));
+}
+
 /// The narrowing the variant trades for its saving: a receipt with a second
 /// event must be rejected, where the general relation accepts it.
 ///
@@ -590,6 +658,13 @@ fn single_log_rejects_a_second_event() {
     assert!(
         !accepts::<super::log::Erc20SingleLog>(&r, 0, &TOKEN, &RECIPIENT, &amt),
         "the single-log variant accepted a receipt with a second event"
+    );
+    // The fixed layout is the variant the relation wires, so it carries the
+    // same obligation. Its logs-list header is pinned to one 157-byte entry,
+    // which a second event cannot satisfy.
+    assert!(
+        !accepts::<super::log::Erc20FixedLayout>(&r, 0, &TOKEN, &RECIPIENT, &amt),
+        "the fixed layout accepted a receipt with a second event"
     );
 }
 
@@ -645,11 +720,19 @@ fn single_log_cost() {
             let before = c.num_constraints();
             if single {
                 let _ = <super::log::Erc20SingleLog as ReceiptRelation<Fr>>::verify(
-                    &buf, &len, &idx, &it, &Boolean::TRUE,
+                    &buf,
+                    &len,
+                    &idx,
+                    &it,
+                    &Boolean::TRUE,
                 );
             } else {
                 let _ = <super::log::Erc20 as ReceiptRelation<Fr>>::verify(
-                    &buf, &len, &idx, &it, &Boolean::TRUE,
+                    &buf,
+                    &len,
+                    &idx,
+                    &it,
+                    &Boolean::TRUE,
                 );
             }
             costs.push(c.num_constraints() - before);
@@ -678,9 +761,8 @@ fn cost() {
         let i = FpVar::new_witness(c.clone(), || Ok(Fr::from(idx as u64))).unwrap();
         let it = intent(&TOKEN, &RECIPIENT, &amt, c.clone());
         let before = c.num_constraints();
-        let _ = <super::log::Erc20 as ReceiptRelation<Fr>>::verify(
-            &buf, &len, &i, &it, &Boolean::TRUE,
-        );
+        let _ =
+            <super::log::Erc20 as ReceiptRelation<Fr>>::verify(&buf, &len, &i, &it, &Boolean::TRUE);
         println!(
             "receipt relation, {bound} byte bound: {} constraints",
             c.num_constraints() - before
@@ -715,7 +797,10 @@ fn log_walk_cost() {
     let check = c.num_constraints() - before_check;
 
     println!("envelope parse:   {env}");
-    println!("log walk:         {walk}   <- {} MAX_LOGS steps", crate::bounds::MAX_LOGS);
+    println!(
+        "log walk:         {walk}   <- {} MAX_LOGS steps",
+        crate::bounds::MAX_LOGS
+    );
     println!("transfer checks:  {check}");
     println!("total:            {}", env + walk + check);
 }
@@ -767,7 +852,9 @@ fn forgeries_defeat_the_null_relation() {
         ("unsupported_envelope", || {
             rejects_unsupported_envelope::<Null>()
         }),
-        ("wrong_bloom_length", || rejects_wrong_bloom_length::<Null>()),
+        ("wrong_bloom_length", || {
+            rejects_wrong_bloom_length::<Null>()
+        }),
         ("wrong_payload_field_count", || {
             rejects_wrong_payload_field_count::<Null>()
         }),
@@ -780,4 +867,77 @@ fn forgeries_defeat_the_null_relation() {
              nothing, so it is not testing anything"
         );
     }
+}
+
+// ------------------------------------------------- authenticated status
+
+/// A receipt with the given type prefix, status payload and no logs.
+fn status_receipt(prefix: Option<u8>, status: &[u8]) -> Vec<u8> {
+    let payload = enc_list(&[
+        enc_str(status),
+        enc_str(&[0x52, 0x08]),
+        enc_str(&[0u8; 256]),
+        enc_list(&[]),
+    ]);
+    let mut out: Vec<u8> = prefix.into_iter().collect();
+    out.extend_from_slice(&payload);
+    out
+}
+
+fn status_accepted(bytes: &[u8], claimed_len: usize) -> bool {
+    let c = ConstraintSystem::<Fr>::new_ref();
+    let buf = alloc_bounded(c.clone(), bytes, 396).unwrap();
+    let len = FpVar::new_witness(c.clone(), || Ok(Fr::from(claimed_len as u64))).unwrap();
+    super::envelope::enforce_success(&buf, &len, &Boolean::TRUE).unwrap();
+    c.is_satisfied().unwrap()
+}
+
+#[test]
+fn success_is_read_behind_every_envelope() {
+    for prefix in [None, Some(1), Some(2), Some(3), Some(4)] {
+        let r = status_receipt(prefix, &[1]);
+        assert!(status_accepted(&r, r.len()), "rejected type {prefix:?}");
+    }
+}
+
+#[test]
+fn success_rejects_failure_and_state_roots() {
+    let failed = status_receipt(Some(2), &[]);
+    assert!(!status_accepted(&failed, failed.len()), "accepted status 0");
+    let root = status_receipt(None, &[0x11; 32]);
+    assert!(!status_accepted(&root, root.len()), "accepted a state root");
+}
+
+#[test]
+fn success_rejects_unknown_envelopes_and_wrong_lengths() {
+    let r = status_receipt(Some(5), &[1]);
+    assert!(!status_accepted(&r, r.len()), "accepted type 0x05");
+    let r = status_receipt(Some(2), &[1]);
+    assert!(!status_accepted(&r, r.len() - 1), "accepted a short length");
+}
+
+#[test]
+fn success_is_inert_when_inactive() {
+    let c = ConstraintSystem::<Fr>::new_ref();
+    let buf = alloc_bounded(c.clone(), &[0xff; 40], 396).unwrap();
+    let len = FpVar::new_witness(c.clone(), || Ok(Fr::from(40u64))).unwrap();
+    super::envelope::enforce_success(&buf, &len, &Boolean::FALSE).unwrap();
+    assert!(c.is_satisfied().unwrap());
+}
+
+/// **Forgery: a typed receipt whose list header is not 0xf9.** The length
+/// bytes and status are placed where the 0xf9 layout expects them, so only
+/// the header check can reject it.
+#[test]
+fn success_rejects_a_wrong_list_header() {
+    let len = 300usize;
+    let mut r = vec![0u8; len];
+    r[0] = 0x02;
+    r[1] = 0xaa;
+    r[2] = ((len - 4) >> 8) as u8;
+    r[3] = (len - 4) as u8;
+    r[4] = 0x01;
+    assert!(!status_accepted(&r, len), "accepted header 0xaa");
+    r[1] = 0xf9;
+    assert!(status_accepted(&r, len), "the control case must pass");
 }

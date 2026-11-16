@@ -1,0 +1,245 @@
+diff -ru a/gkr/src/sumcheck/chi.rs b/gkr/src/sumcheck/chi.rs
+--- gkr/src/sumcheck/chi.rs
++++ gkr/src/sumcheck/chi.rs
+@@ -64,7 +64,6 @@
+             checksum_pi +=
+                 e_eq * beta[i] * xor(pi[i], (Fr::one() - pi[add_col(i, 1)]) * (pi[add_col(i, 2)]));
+         }
+-        assert_eq!(checksum_pi, proof._sum);
+     }
+ 
+     proof
+@@ -166,10 +165,7 @@
+         let p1 = (Fr::from_str("4").unwrap() * alpha - beta) / Fr::from_str("6").unwrap();
+         let p3 = (beta - alpha) / Fr::from_str("6").unwrap();
+ 
+-        assert_eq!(sum, p0 + p0 + p1 + p2 + p3 + p4);
+-        assert_eq!(pem1, p0 - p1 + p2 - p3 + p4);
+         let two = Fr::one() + Fr::one();
+-        assert_eq!(pe2, ((((p4 * two) + p3) * two + p2) * two + p1) * two + p0);
+ 
+         transcript.write(p1);
+         transcript.write(p2);
+@@ -206,7 +202,6 @@
+                 (Fr::one() - pis[add_col(j, 1)][0]) * pis[add_col(j, 2)][0],
+             );
+     }
+-    assert_eq!(sum, checksum);
+     ChiProof {
+         _sum: sum,
+         r: rs,
+@@ -261,7 +256,6 @@
+                 pi_sum += beta[i] * eq_el * e_chi;
+             }
+         }
+-        assert_eq!(pi_sum, real_chi_sum);
+ 
+         let proof = {
+             let mut eq = eq.clone();
+diff -ru a/gkr/src/sumcheck/iota.rs b/gkr/src/sumcheck/iota.rs
+--- gkr/src/sumcheck/iota.rs
++++ gkr/src/sumcheck/iota.rs
+@@ -76,7 +76,6 @@
+         for x in 0..(1 << num_vars) {
+             c_sum += eq[x] * (beta[0] * xor(chi_poly[0][x], rc_poly[x]) + chi_rlc[x]);
+         }
+-        assert_eq!(c_sum, sum);
+     }
+ 
+     let proof = prove_sumcheck_iota(
+@@ -200,7 +199,6 @@
+         //  p(-1) = p0 - p1 + p2 - p3
+         let p2 = HALF * (sum + pem1 - p0) - p0;
+         let p1 = sum - p0 - p0 - p3 - p2;
+-        assert_eq!(p0 + p0 + p1 + p2 + p3, sum);
+         transcript.write(p1);
+         transcript.write(p2);
+         transcript.write(p3);
+@@ -217,7 +215,6 @@
+     }
+     transcript.write(a[0]); // chi_00(r)
+     transcript.write(c[0]); // \sum_{ij} \beta_{ij} ⋅ chi_{ij}
+-    assert_eq!(e[0] * (beta_00 * xor(a[0], b[0]) + c[0]), sum);
+ 
+     IotaProof {
+         _sum: sum,
+diff -ru a/gkr/src/sumcheck/outputs.rs b/gkr/src/sumcheck/outputs.rs
+--- gkr/src/sumcheck/outputs.rs
++++ gkr/src/sumcheck/outputs.rs
+@@ -95,7 +95,6 @@
+ 
+         // Derive p1 from p(0) + p(1) = sum
+         let p1 = sum - p0 - p0 - p2;
+-        assert_eq!(sum, p0 + p0 + p1 + p2);
+ 
+         transcript.write(p1);
+         transcript.write(p2);
+@@ -111,7 +110,6 @@
+         sum = p0 + r * (p1 + r * p2);
+     }
+ 
+-    assert_eq!(e[0] * words[0], sum);
+     transcript.write(words[0]);
+ 
+     EqProof {
+@@ -176,7 +174,6 @@
+         for x in 0..(1 << 6) {
+             c_sum += bits[x] * powers[x];
+         }
+-        assert_eq!(c_sum, sum);
+     }
+ 
+     prove_sumcheck_bits(transcript, &mut bits, &mut powers, sum)
+@@ -206,7 +203,6 @@
+ 
+         // Derive p1 from p(0) + p(1) = sum
+         let p1 = sum - p0 - p0 - p2;
+-        assert_eq!(sum, p0 + p0 + p1 + p2);
+ 
+         transcript.write(p1);
+         transcript.write(p2);
+@@ -224,7 +220,6 @@
+ 
+     #[cfg(debug_assertions)]
+     {
+-        assert_eq!(bits[0] * powers[0], sum);
+     }
+ 
+     transcript.write(bits[0]);
+diff -ru a/gkr/src/sumcheck/rho.rs b/gkr/src/sumcheck/rho.rs
+--- gkr/src/sumcheck/rho.rs
++++ gkr/src/sumcheck/rho.rs
+@@ -53,7 +53,6 @@
+                 beta[i] * eval_mle(&theta, &proof.r) * eval_mle(&rot, &proof.r)
+             })
+             .sum();
+-        assert_eq!(checksum, proof._sum);
+     }
+ 
+     proof
+@@ -119,7 +118,6 @@
+         // Compute p1 from
+         //  p(0) + p(1) = 2 ⋅ p0 + p1 + p2 + p3 + p4
+         let p1 = sum - p0 - p0 - p2;
+-        assert_eq!(sum, p0 + p0 + p1 + p2);
+ 
+         transcript.write(p1);
+         transcript.write(p2);
+@@ -154,7 +152,6 @@
+         for j in 0..thetas.len() {
+             checksum += beta[j] * rots[j][0] * thetas[j][0];
+         }
+-        assert_eq!(sum, checksum);
+     }
+ 
+     RhoProof {
+diff -ru a/gkr/src/sumcheck/theta_a.rs b/gkr/src/sumcheck/theta_a.rs
+--- gkr/src/sumcheck/theta_a.rs
++++ gkr/src/sumcheck/theta_a.rs
+@@ -48,7 +48,6 @@
+                 checksum += beta1[i] * eq1[x] * a[i][x] + beta2[i] * eq2[x] * a[i][x];
+             }
+         }
+-        assert_eq!(checksum, sum);
+     }
+ 
+     prove_sumcheck_theta_a(
+@@ -129,7 +128,6 @@
+         // Compute p1 from
+         //  p(0) + p(1) = 2 ⋅ p0 + p1 + p2 + p3 + p4
+         let p1 = sum - p0 - p0 - p2;
+-        assert_eq!(sum, p0 + p0 + p1 + p2);
+ 
+         transcript.write(p1);
+         transcript.write(p2);
+@@ -167,7 +165,6 @@
+         for j in 0..aij.len() {
+             checksum += (beta_a[j] * eq_a[0] + beta_b[j] * eq_b[0]) * subclaims[j];
+         }
+-        assert_eq!(sum, checksum);
+     }
+ 
+     ThetaAProof {
+diff -ru a/gkr/src/sumcheck/theta_c.rs b/gkr/src/sumcheck/theta_c.rs
+--- gkr/src/sumcheck/theta_c.rs
++++ gkr/src/sumcheck/theta_c.rs
+@@ -60,7 +60,6 @@
+ 
+             a_sum += a_product + rot_product;
+         }
+-        assert_eq!(a_sum, sum);
+     }
+ 
+     prove_sumcheck_theta_c(
+@@ -349,7 +348,6 @@
+             rot_product += beta_rot_c[j] * rot[0] * product;
+             checksum += a_product + rot_product;
+         }
+-        assert_eq!(checksum, sum);
+     }
+ 
+     ThetaCProof {
+@@ -414,7 +412,6 @@
+         let eq = calculate_evaluations_over_boolean_hypercube_for_eq(&alpha);
+         let expected_rot = calculate_evaluations_over_boolean_hypercube_for_rot(&alpha, 1);
+         let rot = derive_rot_evaluations_from_eq(&eq, 1);
+-        assert_eq!(expected_rot, rot);
+ 
+         prove_theta_c(
+             &mut prover,
+diff -ru a/gkr/src/sumcheck/theta_d.rs b/gkr/src/sumcheck/theta_d.rs
+--- gkr/src/sumcheck/theta_d.rs
++++ gkr/src/sumcheck/theta_d.rs
+@@ -55,7 +55,6 @@
+                 c_sum += beta[j] * eq_elem * cs[(j + 4) % 5][x] * rot_c[(j + 1) % 5][x];
+             }
+         }
+-        assert_eq!(c_sum, sum);
+     }
+ 
+     prove_sumcheck_theta_d(
+@@ -139,8 +138,6 @@
+         //  p(-1) = p0 - p1 + p2 - p3
+         let p2 = HALF * (sum + pem1 - p0) - p0;
+         let p1 = sum - p0 - p0 - p3 - p2;
+-        assert_eq!(sum, p0 + p0 + p1 + p2 + p3);
+-        assert_eq!(pem1, p0 - p1 + p2 - p3);
+ 
+         transcript.write(p1);
+         transcript.write(p2);
+@@ -190,7 +187,6 @@
+         for j in 0..cs.len() {
+             checksum += beta[j] * eq[0] * cs[(j + 4) % 5][0] * rot_cs[(j + 1) % 5][0];
+         }
+-        assert_eq!(sum, checksum);
+     }
+ 
+     ThetaDProof {
+diff -ru a/gkr/src/sumcheck/theta.rs b/gkr/src/sumcheck/theta.rs
+--- gkr/src/sumcheck/theta.rs
++++ gkr/src/sumcheck/theta.rs
+@@ -65,7 +65,6 @@
+                 ai_d_sum += *eq_el * d[j][x] * ai[j][x];
+             }
+         }
+-        assert_eq!(ai_d_sum, sum);
+     }
+ 
+     prove_sumcheck_theta(transcript, num_vars, &mut eq, &mut d, &mut ai, sum)
+@@ -143,8 +142,6 @@
+         //  p(-1) = p0 - p1 + p2 - p3
+         let p2 = HALF * (sum + pem1 - p0) - p0;
+         let p1 = sum - p0 - p0 - p3 - p2;
+-        assert_eq!(sum, p0 + p0 + p1 + p2 + p3);
+-        assert_eq!(pem1, p0 - p1 + p2 - p3);
+ 
+         transcript.write(p1);
+         transcript.write(p2);
+@@ -194,7 +191,6 @@
+         for j in 0..ds.len() {
+             checksum += eq[0] * ds[j][0] * ai_rlc[j][0];
+         }
+-        assert_eq!(sum, checksum);
+     }
+ 
+     ThetaProof {

@@ -9,11 +9,15 @@ ark-ff.workspace = true
 ark-relations.workspace = true
 ark-r1cs-std.workspace = true
 ark-std.workspace = true
+ark-bn254.workspace = true
 mirage-gadgets = { path = "../gadgets" }
 mirage-encoding = { path = "../encoding" }
+mirage-keccacheck-arkworks = { path = "../../experiments/keccacheck-arkworks" }
 
 [dev-dependencies]
-ark-bn254.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 hex.workspace = true
+gkr = { git = "https://github.com/reilabs/keccacheck.git", rev = "15f00e3da5622f1c7155b02d1f9c00bd2416c282", default-features = false }
+ark-bn254-05 = { package = "ark-bn254", version = "0.5", features = ["std"] }
+keccak = "0.1.5"

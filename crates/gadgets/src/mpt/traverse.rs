@@ -39,10 +39,10 @@ use ark_r1cs_std::uint8::UInt8;
 use ark_relations::gr1cs::SynthesisError;
 
 use super::node::{branch_child_offset, decode_branch, decode_short, is_branch};
-use super::path::{assert_canonical_flags, assert_even_pad_is_zero, nibble_at, read_flags};
+use super::path::{assert_canonical_flags, assert_even_pad_is_zero, nibble_at_with, read_flags};
 use super::{MptVerifier, ProofNode};
-use crate::bytes::{lt as less_than, one_hot, select_byte_with, select_bytes, zero_like};
-use crate::keccak::keccak256_var;
+use crate::bytes::{lt as less_than, one_hot_in_range, select_byte_with, select_bytes, zero_like};
+use crate::keccak::{keccak256_var_with, DirectPermutation, PermutationBackend};
 
 /// # Conditional enforcement: the rule this module exists to demonstrate
 ///
@@ -65,6 +65,22 @@ use crate::keccak::keccak256_var;
 ///
 /// The rule: **gate assertions about the caller's data; never gate a constraint
 /// that defines a witness.**
+///
+/// # The gap that rule left
+///
+/// Definitional constraints being ungated is right, but it does not follow that
+/// a definitional gadget needs no assertion *alongside* it. `one_hot` encodes
+/// an out-of-range index as the all-zero vector, so that vector is available
+/// for an in-range index too, and `select_byte_with` then reads zero. A prover
+/// suppresses a read the circuit believes it made. Range-constraining the index
+/// does not help: the suppressed read is at an in-range index.
+///
+/// So a read whose zero would satisfy something takes
+/// `bytes::one_hot_in_range` or `path::nibble_at_with`, which keep the
+/// definitional constraints ungated and add a gated "a hit did occur"
+/// assertion. Reads that are genuinely speculative still pass a false
+/// `active`: a path-match iteration past `path_nibbles`, or an unselected
+/// leaf layout.
 ///
 /// Cost is unaffected either way — `conditional_enforce_equal` costs what
 /// `enforce_equal` does.
@@ -107,6 +123,30 @@ impl<F: PrimeField> MptVerifier<F> for Traversal {
         value_len: &FpVar<F>,
         nodes: &[ProofNode<F>],
     ) -> Result<(), SynthesisError> {
+        Self::verify_inclusion_with(
+            root,
+            key,
+            key_len,
+            value,
+            value_len,
+            nodes,
+            &mut DirectPermutation,
+        )
+    }
+}
+
+impl Traversal {
+    /// Verify every node hash with a caller-owned permutation backend.
+    /// One backend may collect hashes from multiple tries into the same batch.
+    pub fn verify_inclusion_with<F: PrimeField, B: PermutationBackend<F>>(
+        root: &[UInt8<F>],
+        key: &[UInt8<F>],
+        key_len: &FpVar<F>,
+        value: &[UInt8<F>],
+        value_len: &FpVar<F>,
+        nodes: &[ProofNode<F>],
+        backend: &mut B,
+    ) -> Result<(), SynthesisError> {
         // What the next node's hash must equal. Starts as the claimed root
         // (invariant 1) and is replaced at each level by the selected child
         // reference (invariant 2).
@@ -147,7 +187,7 @@ impl<F: PrimeField> MptVerifier<F> for Traversal {
             // Computed unconditionally: an inactive slot has zero length and
             // hashes to the empty-input digest, which will not match, so the
             // comparison is gated on `active` rather than the hash itself.
-            let digest = keccak256_var(&level.bytes, &level.len, &active)?;
+            let digest = keccak256_var_with(&level.bytes, &level.len, backend)?;
             for (d, e) in digest.iter().zip(expected.iter()) {
                 let d_byte = bits_to_byte(d)?;
                 d_byte.conditional_enforce_equal(e, &active)?;
@@ -171,13 +211,12 @@ impl<F: PrimeField> MptVerifier<F> for Traversal {
 
             // ---- branch case: follow the nibble's child (invariant 3) ----
             profile(&level.bytes, "decoders", &mut mark);
-            let nibble = nibble_at(key, &consumed)?;
-            let child_offset =
-                branch_child_offset(&branch, &nibble, &branch_active)?;
+            let nibble = nibble_at_with(key, &consumed, &branch_active)?;
+            let child_offset = branch_child_offset(&branch, &nibble, &branch_active)?;
 
             // ---- short case: read flags and match the path (invariant 4) ----
             profile(&level.bytes, "child-hash", &mut mark);
-            let first_sel = one_hot(&short.path_offset, level.bytes.len())?;
+            let first_sel = one_hot_in_range(&short.path_offset, level.bytes.len(), &short_active)?;
             let first = select_byte_with(&level.bytes, &first_sel)?;
             // These bind only for short nodes: on a branch, `path_offset` is
             // a child-reference prefix such as 0xa0, whose high bits are set by
@@ -207,7 +246,6 @@ impl<F: PrimeField> MptVerifier<F> for Traversal {
                 &short_active,
             )?;
 
-
             // An extension's tail is the child reference the walk follows next.
             //
             // Only 32 bytes are read, but at ~10 constraints per buffer byte
@@ -223,11 +261,8 @@ impl<F: PrimeField> MptVerifier<F> for Traversal {
             // over a 544-byte node is ~160k constraints, and doing it twice was
             // 18% of a level.
             profile(&level.bytes, "path-match", &mut mark);
-            let next_offset = FpVar::conditionally_select(
-                &this_is_branch,
-                &child_offset,
-                &short.tail_offset,
-            )?;
+            let next_offset =
+                FpVar::conditionally_select(&this_is_branch, &child_offset, &short.tail_offset)?;
             let next_ref = select_bytes(&level.bytes, &next_offset, 32)?;
 
             // ---- terminate or descend ----
@@ -250,18 +285,13 @@ impl<F: PrimeField> MptVerifier<F> for Traversal {
             // every level costs ~2M each.
             let is_term = active.clone() & terminates.clone();
             term_node = select_bytes_cond(&level.bytes, &term_node, &is_term)?;
-            term_offset =
-                FpVar::conditionally_select(&is_term, &short.tail_offset, &term_offset)?;
+            term_offset = FpVar::conditionally_select(&is_term, &short.tail_offset, &term_offset)?;
             term_len = FpVar::conditionally_select(&is_term, &short.tail_len, &term_len)?;
 
             profile(&level.bytes, "consume+value", &mut mark);
             // Advance. A branch consumes one nibble, an extension consumes its
             // path, a leaf ends the walk.
-            let step = FpVar::conditionally_select(
-                &this_is_branch,
-                &FpVar::one(),
-                &path_nibbles,
-            )?;
+            let step = FpVar::conditionally_select(&this_is_branch, &FpVar::one(), &path_nibbles)?;
             consumed = FpVar::conditionally_select(
                 &(active.clone() & !terminates.clone()),
                 &(&consumed + &step),
@@ -269,7 +299,11 @@ impl<F: PrimeField> MptVerifier<F> for Traversal {
             )?;
 
             // The next expected hash.
-            expected = cond_select_bytes(&next_ref, &expected, &(active.clone() & !terminates.clone()))?;
+            expected = cond_select_bytes(
+                &next_ref,
+                &expected,
+                &(active.clone() & !terminates.clone()),
+            )?;
 
             profile(&level.bytes, "advance", &mut mark);
             // Invariant 7: nothing may follow a termination.
@@ -296,7 +330,9 @@ impl<F: PrimeField> MptVerifier<F> for Traversal {
 }
 
 /// Eight boolean bits, least significant first, back into a `UInt8`.
-fn bits_to_byte<F: PrimeField>(bits: &[Boolean<F>; 8]) -> Result<UInt8<F>, SynthesisError> {
+pub(super) fn bits_to_byte<F: PrimeField>(
+    bits: &[Boolean<F>; 8],
+) -> Result<UInt8<F>, SynthesisError> {
     Ok(UInt8::from_bits_le(bits))
 }
 
@@ -324,7 +360,7 @@ fn cond_select_bytes<F: PrimeField>(
 ///
 /// Invariant 4. Compares up to a compiled maximum, gating each position on
 /// whether it is within the actual path length.
-fn assert_path_matches<F: PrimeField>(
+pub(super) fn assert_path_matches<F: PrimeField>(
     node: &[UInt8<F>],
     short: &super::node::ShortNode<F>,
     is_odd: &Boolean<F>,
@@ -345,16 +381,17 @@ fn assert_path_matches<F: PrimeField>(
     for j in 0..max_path_nibbles {
         let jf = FpVar::constant(F::from(j as u64));
         let within = less_than(&jf, path_nibbles)?;
+        let bind = active.clone() & within;
 
         // Path nibble, read relative to the path field's start.
         let path_pos = &short.path_offset * FpVar::constant(F::from(2u64)) + &skip + &jf;
-        let from_path = nibble_at(node, &path_pos)?;
+        let from_path = nibble_at_with(node, &path_pos, &bind)?;
 
         // Key nibble.
         let key_pos = consumed + &jf;
-        let from_key = nibble_at(key, &key_pos)?;
+        let from_key = nibble_at_with(key, &key_pos, &bind)?;
 
-        from_path.conditional_enforce_equal(&from_key, &(active.clone() & within))?;
+        from_path.conditional_enforce_equal(&from_key, &bind)?;
     }
     Ok(())
 }

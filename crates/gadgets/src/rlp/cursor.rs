@@ -231,9 +231,8 @@ impl<F: PrimeField> RlpDecoder<F> for Cursor {
 
         // Canonical: a short string of exactly one byte below 0x80 must have
         // been written bare. Reject 0x81 followed by such a byte.
-        let is_one_byte_str = p.is_short_form.clone()
-            & !p.is_list.clone()
-            & p.short_len.is_eq(&FpVar::one())?;
+        let is_one_byte_str =
+            p.is_short_form.clone() & !p.is_list.clone() & p.short_len.is_eq(&FpVar::one())?;
         let content_sel = one_hot(&offset, buf.len())?;
         let content = select_byte_with(buf, &content_sel)?;
         let content_lt_80 = less_than_const(&byte_to_field(&content)?, 0x80)?;
@@ -259,7 +258,8 @@ impl<F: PrimeField> RlpDecoder<F> for Cursor {
         active: &Boolean<F>,
     ) -> Result<Vec<Item<F>>, SynthesisError> {
         let list = Self::decode_item(buf, at, active)?;
-        list.is_list.conditional_enforce_equal(&Boolean::TRUE, active)?;
+        list.is_list
+            .conditional_enforce_equal(&Boolean::TRUE, active)?;
 
         let list_end = list.end();
         let mut cursor = list.offset.clone();
@@ -303,10 +303,10 @@ mod tests {
     /// decode is required either way to verify the hint.
     #[test]
     fn cost_breakdown() {
+        use crate::bytes::alloc_bounded;
         use ark_bn254::Fr;
         use ark_r1cs_std::alloc::AllocVar;
         use ark_relations::gr1cs::ConstraintSystem;
-        use crate::bytes::alloc_bounded;
 
         let bound = 1024;
         let data = vec![0x85, 0xaa, 0xaa, 0xaa, 0xaa, 0xaa];
@@ -318,7 +318,10 @@ mod tests {
         let before = c.num_constraints();
         let sel = crate::bytes::one_hot(&at, bound).unwrap();
         let _ = crate::bytes::select_byte_with(&buf, &sel).unwrap();
-        println!("  one byte read (one_hot + select): {}", c.num_constraints() - before);
+        println!(
+            "  one byte read (one_hot + select): {}",
+            c.num_constraints() - before
+        );
 
         // full decode_item
         let c2 = ConstraintSystem::<Fr>::new_ref();
@@ -326,6 +329,9 @@ mod tests {
         let at2 = FpVar::new_witness(c2.clone(), || Ok(Fr::from(0u64))).unwrap();
         let before2 = c2.num_constraints();
         let _ = <Cursor as RlpDecoder<Fr>>::decode_item(&buf2, &at2, &Boolean::TRUE).unwrap();
-        println!("  full decode_item:                 {}", c2.num_constraints() - before2);
+        println!(
+            "  full decode_item:                 {}",
+            c2.num_constraints() - before2
+        );
     }
 }

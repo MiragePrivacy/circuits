@@ -68,10 +68,10 @@ fn trim_leading_zeros(b: &[u8]) -> Vec<u8> {
 /// A receipt-shaped fixture: `[status, cumulativeGasUsed, logsBloom, logs]`.
 fn receipt_fixture() -> Vec<u8> {
     enc_list(&[
-        enc_str(&[1]),           // status
-        enc_str(&[0x52, 0x08]),  // cumulativeGasUsed
-        enc_str(&[0u8; 256]),    // logsBloom
-        enc_list(&[]),           // logs, empty
+        enc_str(&[1]),          // status
+        enc_str(&[0x52, 0x08]), // cumulativeGasUsed
+        enc_str(&[0u8; 256]),   // logsBloom
+        enc_list(&[]),          // logs, empty
     ])
 }
 
@@ -81,7 +81,10 @@ fn receipt_fixture() -> Vec<u8> {
 /// rejection, since neither produces a proof.
 fn accepts<Body>(buf_bytes: &[u8], bound: usize, body: Body) -> bool
 where
-    Body: Fn(&[ark_r1cs_std::uint8::UInt8<Fr>], ConstraintSystemRef<Fr>) -> Result<(), SynthesisError>,
+    Body: Fn(
+        &[ark_r1cs_std::uint8::UInt8<Fr>],
+        ConstraintSystemRef<Fr>,
+    ) -> Result<(), SynthesisError>,
 {
     let c = cs();
     let buf = alloc_bounded(c.clone(), buf_bytes, bound).unwrap();
@@ -102,7 +105,12 @@ pub fn accepts_canonical_forms<D: RlpDecoder<Fr>>() {
         ("short string", enc_str(&[0xaa; 5]), 1, 5),
         ("long string", enc_str(&[0xbb; 100]), 2, 100),
         ("empty list", enc_list(&[]), 1, 0),
-        ("short list", enc_list(&[enc_str(&[1]), enc_str(&[2])]), 1, 2),
+        (
+            "short list",
+            enc_list(&[enc_str(&[1]), enc_str(&[2])]),
+            1,
+            2,
+        ),
     ];
 
     for (name, bytes, want_off, want_len) in cases {

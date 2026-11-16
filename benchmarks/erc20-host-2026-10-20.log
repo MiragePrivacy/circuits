@@ -1,0 +1,9 @@
+circuit=erc20 setup_threads=16 plan=[(Prover(Whole), 16), (Prover(Whole), 16), (Prover(Whole), 16)]
+setup threads=16: 20.6s, heap peak 9.36 GiB (resident before 0.00 GiB, after 0.69 GiB)
+proving key resident: 0.69 GiB
+prove mode=Prover(Whole) threads=16: 7.3s, heap peak 2.06 GiB (resident before 0.69 GiB, after 0.69 GiB)
+  verified: true
+prove mode=Prover(Whole) threads=16: 7.5s, heap peak 2.06 GiB (resident before 0.69 GiB, after 0.69 GiB)
+  verified: true
+prove mode=Prover(Whole) threads=16: 7.7s, heap peak 2.06 GiB (resident before 0.69 GiB, after 0.69 GiB)
+  verified: true

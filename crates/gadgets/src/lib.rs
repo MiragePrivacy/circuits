@@ -26,14 +26,16 @@
 //! `cs.is_satisfied()` in every gadget test, and assert on `num_constraints()`
 //! so a cost regression is visible in the diff.
 
+pub mod ancestry;
 pub mod bytes;
-pub mod mpt;
-pub mod receipt;
-pub mod rlp;
-pub mod statement;
 pub mod commitment;
 pub mod header;
 pub mod keccak;
+pub mod mpt;
+pub mod receipt;
+pub mod rlp;
+pub mod transaction;
+pub mod statement;
 
 /// Compiled bounds from spec section 12.9.
 ///
@@ -53,8 +55,16 @@ pub mod bounds {
     pub const MAX_MPT_DEPTH: usize = 16;
     pub const MAX_LOGS: usize = 8;
 
-    /// Unused in step 2, which reveals the transaction block. Step 5 adds the
-    /// ancestry chain that consumes these.
+    /// The native relation's transaction buffer. A bare value transfer is
+    /// ~110 bytes for EIP-1559 and less for legacy; the headroom covers a
+    /// non-empty access list, which the relation does not walk but must still
+    /// contain.
+    pub const MAX_TRANSACTION_BYTES: usize = 512;
+
+    /// Ancestry distance range for [`crate::ancestry`]. Each header costs five
+    /// Keccak-f permutations at a 679-byte header bound; 39 is the largest
+    /// distance that keeps both relations within a 256-permutation Keccacheck
+    /// batch.
     pub const MIN_WITNESS_DISTANCE: usize = 8;
-    pub const MAX_WITNESS_DISTANCE: usize = 16;
+    pub const MAX_WITNESS_DISTANCE: usize = 39;
 }

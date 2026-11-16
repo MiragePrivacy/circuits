@@ -10,9 +10,11 @@
 //!  parentBeaconBlockRoot, requestsHash]
 //! ```
 //!
-//! Step 2 needs two fields: `receiptsRoot` at index 5, which the MPT traversal
-//! authenticates against, and `number` at index 8, which the timing assertions
-//! use. Step 5's ancestry chain will additionally need `parentHash` at index 0.
+//! The ERC-20 relation needs two fields: `receiptsRoot` at index 5, which the
+//! MPT traversal authenticates against, and `number` at index 8, which the
+//! timing assertions use. The native relation additionally reads
+//! `transactionsRoot` at index 4 for its second trie. The ancestry chain in
+//! [`crate::ancestry`] reads `parentHash` at index 0.
 //!
 //! # Why the field count is enforced
 //!
@@ -31,9 +33,11 @@
 
 use ark_ff::PrimeField;
 use ark_r1cs_std::boolean::Boolean;
+use ark_r1cs_std::convert::ToBitsGadget;
 use ark_r1cs_std::eq::EqGadget;
 use ark_r1cs_std::fields::fp::FpVar;
 use ark_r1cs_std::fields::FieldVar;
+use ark_r1cs_std::select::CondSelectGadget;
 use ark_r1cs_std::uint8::UInt8;
 use ark_relations::gr1cs::SynthesisError;
 
@@ -53,6 +57,8 @@ pub struct Header<F: PrimeField> {
     pub parent_hash: Vec<UInt8<F>>,
     /// 32 bytes.
     pub receipts_root: Vec<UInt8<F>>,
+    /// 32 bytes. The native relation's second trie hangs from this.
+    pub transactions_root: Vec<UInt8<F>>,
     /// The block number, as a field element.
     pub number: FpVar<F>,
 }
@@ -75,7 +81,8 @@ pub fn parse<F: PrimeField>(
 
     // The list must span the whole header: no trailing bytes.
     let list = Cursor::decode_item(header, &zero, active)?;
-    list.is_list.conditional_enforce_equal(&Boolean::TRUE, active)?;
+    list.is_list
+        .conditional_enforce_equal(&Boolean::TRUE, active)?;
     list.end().conditional_enforce_equal(header_len, active)?;
 
     // The three 32-byte hash fields this build reads.
@@ -87,6 +94,7 @@ pub fn parse<F: PrimeField>(
 
     let parent_hash = select_bytes(header, &items[IDX_PARENT_HASH].offset, 32)?;
     let receipts_root = select_bytes(header, &items[IDX_RECEIPTS_ROOT].offset, 32)?;
+    let transactions_root = select_bytes(header, &items[IDX_TRANSACTIONS_ROOT].offset, 32)?;
 
     // The block number is a canonical RLP integer below 2^64, so at most 8
     // payload bytes. The decoder rejects non-canonical encodings, so a short
@@ -99,6 +107,92 @@ pub fn parse<F: PrimeField>(
     Ok(Header {
         parent_hash,
         receipts_root,
+        transactions_root,
+        number,
+    })
+}
+
+/// The byte ranges [`parse_authenticated_prefix`] reads. A buffer passed to it
+/// may hold placeholders anywhere else.
+pub const AUTHENTICATED_PREFIX_READS: [core::ops::Range<usize>; 2] = [0..192, 448..458];
+
+/// Extracts the fields before the first variable-width header item using the
+/// fixed post-Prague prefix layout.
+///
+/// This variant is sound only when the caller separately proves that
+/// `keccak256(header)` is a canonical chain block hash. Consensus then supplies
+/// the full-header validity that [`parse`] establishes syntactically. The
+/// circuit still pins every fixed prefix through `difficulty` and canonically
+/// decodes `number`; an unknown fork that changes this prefix fails closed.
+pub fn parse_authenticated_prefix<F: PrimeField>(
+    header: &[UInt8<F>],
+    _header_len: &FpVar<F>,
+    active: &Boolean<F>,
+) -> Result<Header<F>, SynthesisError> {
+    // Two-byte long-list length, followed by the fixed-width fields through
+    // post-Merge difficulty. Payload length bytes remain variable.
+    for (at, want) in [
+        (0usize, 0xf9u8),
+        (3, 0xa0),  // parentHash
+        (36, 0xa0), // ommersHash
+        (69, 0x94), // beneficiary
+        (90, 0xa0), // stateRoot
+        (123, 0xa0), // transactionsRoot
+        (156, 0xa0), // receiptsRoot
+        (189, 0xb9), // logsBloom, 256 bytes
+        (190, 0x01),
+        (191, 0x00),
+        (448, 0x80), // post-Merge difficulty == 0
+    ] {
+        header[at].conditional_enforce_equal(&UInt8::constant(want), active)?;
+    }
+
+    let parent_hash = header[4..36].to_vec();
+    let transactions_root = header[124..156].to_vec();
+    let receipts_root = header[157..189].to_vec();
+
+    // Number begins at a compile-time offset. Enumerating its at-most-eight
+    // byte canonical integer forms is dramatically cheaper than walking the
+    // other twenty RLP items to discover the same offset.
+    let prefix = &header[449];
+    let bits = {
+        use ark_r1cs_std::convert::ToBitsGadget;
+        prefix.to_bits_le()?
+    };
+    let bare = !bits[7].clone();
+    let mut accepted = bare.clone();
+    let mut number = crate::bytes::byte_to_field(prefix)?;
+
+    for width in 1usize..=8 {
+        let selected = prefix.is_eq(&UInt8::constant(0x80 + width as u8))?;
+        accepted |= selected.clone();
+
+        let mut value = FpVar::zero();
+        for byte in &header[450..450 + width] {
+            value = value * FpVar::constant(F::from(256u64))
+                + crate::bytes::byte_to_field(byte)?;
+        }
+        number = FpVar::conditionally_select(&selected, &value, &number)?;
+
+        // Minimal integer encoding, beyond ordinary canonical RLP: a one-byte
+        // payload below 0x80 is bare, and a wider integer has no leading zero.
+        if width == 1 {
+            let first_bits = header[450].to_bits_le()?;
+            first_bits[7].conditional_enforce_equal(&Boolean::TRUE, &(active.clone() & selected))?;
+        } else {
+            let first_is_zero = header[450].is_eq(&UInt8::constant(0))?;
+            first_is_zero.conditional_enforce_equal(
+                &Boolean::FALSE,
+                &(active.clone() & selected),
+            )?;
+        }
+    }
+    accepted.conditional_enforce_equal(&Boolean::TRUE, active)?;
+
+    Ok(Header {
+        parent_hash,
+        receipts_root,
+        transactions_root,
         number,
     })
 }
@@ -131,7 +225,7 @@ fn big_endian_value<F: PrimeField>(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use ark_bn254::Fr;
     use ark_r1cs_std::alloc::AllocVar;
@@ -179,8 +273,17 @@ mod tests {
 
     /// A 21-field header with recognisable roots and a given block number.
     pub fn header_fixture(receipts_root: &[u8; 32], number: u64) -> Vec<u8> {
+        header_with_parent(&[0x01; 32], receipts_root, number)
+    }
+
+    /// [`header_fixture`] with a chosen `parentHash`.
+    pub(crate) fn header_with_parent(
+        parent_hash: &[u8; 32],
+        receipts_root: &[u8; 32],
+        number: u64,
+    ) -> Vec<u8> {
         let mut fields: Vec<Vec<u8>> = Vec::with_capacity(FIELD_COUNT);
-        fields.push(enc_str(&[0x01; 32])); // parentHash
+        fields.push(enc_str(parent_hash)); // parentHash
         fields.push(enc_str(&[0x02; 32])); // ommersHash
         fields.push(enc_str(&[0x03; 20])); // beneficiary
         fields.push(enc_str(&[0x04; 32])); // stateRoot
@@ -228,11 +331,40 @@ mod tests {
     }
 
     #[test]
+    fn authenticated_prefix_matches_the_full_parser() {
+        let root = [0xab; 32];
+        let bytes = header_fixture(&root, 21_000_000);
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        let buf = alloc_bounded(cs.clone(), &bytes, BOUND).unwrap();
+        let len = FpVar::new_witness(cs.clone(), || Ok(Fr::from(bytes.len() as u64))).unwrap();
+        let h = parse_authenticated_prefix(&buf, &len, &Boolean::TRUE).unwrap();
+        assert_eq!(h.receipts_root.iter().map(|b| b.value().unwrap()).collect::<Vec<_>>(), root);
+        assert_eq!(h.transactions_root.iter().map(|b| b.value().unwrap()).collect::<Vec<_>>(), bytes[124..156]);
+        assert_eq!(h.number.value().unwrap(), Fr::from(21_000_000u64));
+        assert!(cs.is_satisfied().unwrap());
+    }
+
+    #[test]
+    fn authenticated_prefix_rejects_a_shifted_schema() {
+        let mut bytes = header_fixture(&[0xab; 32], 21_000_000);
+        bytes[156] = 0x9f; // receiptsRoot is no longer a 32-byte string.
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        let buf = alloc_bounded(cs.clone(), &bytes, BOUND).unwrap();
+        let len = FpVar::new_witness(cs.clone(), || Ok(Fr::from(bytes.len() as u64))).unwrap();
+        let _ = parse_authenticated_prefix(&buf, &len, &Boolean::TRUE).unwrap();
+        assert!(!cs.is_satisfied().unwrap());
+    }
+
+    #[test]
     fn reads_small_and_large_block_numbers() {
         for n in [0u64, 1, 255, 256, 21_000_000, u32::MAX as u64] {
             let (ok, h) = run(&header_fixture(&[0xcd; 32], n));
             assert!(ok, "rejected header with number {n}");
-            assert_eq!(h.unwrap().number.value().unwrap(), Fr::from(n), "number {n}");
+            assert_eq!(
+                h.unwrap().number.value().unwrap(),
+                Fr::from(n),
+                "number {n}"
+            );
         }
     }
 
@@ -279,7 +411,10 @@ mod tests {
                 fields.push(enc_str(&[0x11; 32]));
             }
         }
-        assert!(!run(&enc_list(&fields)).0, "accepted a 16-byte receiptsRoot");
+        assert!(
+            !run(&enc_list(&fields)).0,
+            "accepted a 16-byte receiptsRoot"
+        );
     }
 
     /// **Forgery: trailing bytes after the header list.**

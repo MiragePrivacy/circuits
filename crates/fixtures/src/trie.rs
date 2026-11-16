@@ -211,7 +211,11 @@ mod tests {
         assert_eq!(hex_prefix(&[0xa], false), vec![0x1a], "odd extension");
         assert_eq!(hex_prefix(&[], true), vec![0x20], "even leaf");
         assert_eq!(hex_prefix(&[0xa], true), vec![0x3a], "odd leaf");
-        assert_eq!(hex_prefix(&[1, 2], true), vec![0x20, 0x12], "even leaf pair");
+        assert_eq!(
+            hex_prefix(&[1, 2], true),
+            vec![0x20, 0x12],
+            "even leaf pair"
+        );
     }
 
     #[test]
