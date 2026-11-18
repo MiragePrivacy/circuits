@@ -1,21 +1,16 @@
 # Mirage settlement circuits
 
-**Current native Keccacheck integration:** [implementation, counts, and benchmarks](NATIVE_ETH_STACK.md). The native circuit uses a 61-permutation batch padded to 64 and has 2,017,536 constraints, with both tries supporting depth seven. The direct-Keccak figures below describe the earlier baseline.
+These Rust circuits let a Mirage escrow verify delivery without seeing the payment receipt or exact transaction block. A client commits to the expected payment. The prover opens that commitment privately and proves delivery against Ethereum block data. The verifier checks two public field elements that encode the statement hash.
 
-Rust/arkworks circuits for the ZK receipt relation in
-`../docs/standalone-zk-receipt-protocol-v1.2.md`.
+- **ERC-20:** the circuit proves receipt inclusion and checks that a successful receipt contains the expected token’s `Transfer` log.
+- **Native ETH:** the circuit proves inclusion of the transaction and its successful receipt at the same transaction index, then checks the recipient and value in the transaction.
+- **Both paths:** the circuit proves ancestry from the later public witness block to the private settlement block and enforces the reservation window. Batch escrows verify one proof for each row they pay out.
 
-**Backend: Groth16 over BN254 via `ark-groth16`.** This overrides spec section
-12.1, which freezes Circom + snarkjs. `FINDINGS.md` records why, with measured
-evidence for each rejected alternative — read it before proposing a change.
+The backend is Groth16 over BN254 using arkworks. Native and ERC-20 use separate proving and verifying keys. For integration, match the circuit revision, ceremony keys, and [escrow verifier artifacts](https://github.com/MiragePrivacy/escrow). See [Beta SGX ceremony](#beta-sgx-ceremony) for key provenance and [Native ETH stack](NATIVE_ETH_STACK.md) for optimization measurements.
 
-Status: **steps 2 and 3 complete.** The ERC-20 relation synthesizes at ~10.4M
-constraints, is satisfied by all 100 mainnet fixtures, and a real proof verifies
-through the exported Solidity verifier on-chain (4,858 bytes, ~222.7k gas). The
-native-ETH relation synthesizes at ~17.8M constraints and is satisfied by all
-100 bare-send mainnet fixtures at the compiled bounds. One thing still blocks
-it: its proving time leaks the asset kind, which spec 12.9 forbids. See "Native
-ETH" below.
+## Development history
+
+The figures below capture several stages of development. The direct-Keccak counts and seeded-setup measurements describe earlier builds. The checkout and its pinned keys determine the constraints and artifact compatibility for any particular release.
 
 ## Build order
 
