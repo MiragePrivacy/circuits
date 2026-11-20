@@ -1,6 +1,6 @@
-# Keccacheck arkworks experiment
+# Arkworks Keccacheck circuit backend
 
-This excluded standalone crate ports the recursive Keccacheck verifier from
+This crate ports the recursive Keccacheck verifier from
 gnark to arkworks R1CS. It deliberately consumes the native proof produced by
 Reilabs' Rust `gkr` crate at pinned commit
 `15f00e3da5622f1c7155b02d1f9c00bd2416c282` with WHIR disabled, matching the
@@ -8,8 +8,8 @@ reference's direct input-bit verification mode. The circuit side now uses
 arkworks 0.6, matching Mirage; the pinned native Rust prover remains on 0.5 and
 crosses that boundary through canonical BN254 scalar values.
 
-It is still experimental, but the integration branch now supplies a deferred
-backend used by the real Mirage relation and an alternate Rust prover API.
+The backend supplies the deferred verifier used by the Mirage relations and an
+alternate Rust prover API.
 
 The runtime path is Rust-only. The gnark source is neither linked nor executed;
 it was used as a readable reference for the circuit formulas. Cargo currently
@@ -25,7 +25,7 @@ Run the fast comparison with:
 
 ```sh
 nix develop -c cargo run --release --manifest-path \
-  experiments/keccacheck-arkworks/Cargo.toml -- compare 2 8
+  crates/keccacheck/Cargo.toml -- compare 2 8
 ```
 
 The comparison reports native proof construction, arkworks synthesis,

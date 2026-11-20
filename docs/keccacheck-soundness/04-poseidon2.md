@@ -1,7 +1,7 @@
 # 04: Poseidon2 instantiation analysis
 
 Width-16 Poseidon2 over BN254 Fr as used by the Keccacheck transcript. Code: PR 3 at cc59207,
-experiments/keccacheck-arkworks/src/poseidon2.rs, and pinned upstream gkr 15f00e3.
+crates/keccacheck/src/poseidon2.rs, and pinned upstream gkr 15f00e3.
 Scripts are in scripts/poseidon2/ (named below by file).
 
 Strength labels: RUN means a script or test was executed. READ means code or a paper was read.
@@ -361,10 +361,10 @@ a block boundary before squeezing, would enable a skip. Cost then falls toward 5
 ## 10. Tests
 
 Test code only:
-- experiments/keccacheck-arkworks/src/poseidon2.rs: only adds a cfg(test) module declaration.
-- experiments/keccacheck-arkworks/src/poseidon2/params_tests.rs: Grain regeneration, extracted M_E and M_I, M4 MDS, Krylov rank,
+- crates/keccacheck/src/poseidon2.rs: only adds a cfg(test) module declaration.
+- crates/keccacheck/src/poseidon2/params_tests.rs: Grain regeneration, extracted M_E and M_I, M4 MDS, Krylov rank,
   round counts, gcd, round order, test vector, 555 constraints, absorb positions after squeeze, sponge against native.
-- experiments/keccacheck-arkworks/tests/poseidon2_permutation_count.rs: 1835, 2007, 2783 permutations at 2, 4, 64 instances.
+- crates/keccacheck/tests/poseidon2_permutation_count.rs: 1835, 2007, 2783 permutations at 2, 4, 64 instances.
 
 All pass: 26 lib tests and 1 integration test. They ran from a scratch mirror (a scratch copy of the crate), because cargo in this nested
 worktree resolves to the main checkout's workspace and refuses the crate. Irreducibility of M_I^k is checked by mi3.gp only, not in

@@ -1,8 +1,8 @@
 # 01: Keccacheck as implemented
 
 Agent: protocol. Code: PR 3 head cc59207. Paths are relative to the repo root; `V:` means
-experiments/keccacheck-arkworks/src/verifier.rs and `B:` means
-experiments/keccacheck-arkworks/src/batch.rs. Line numbers are at cc59207.
+crates/keccacheck/src/verifier.rs and `B:` means
+crates/keccacheck/src/batch.rs. Line numbers are at cc59207.
 
 ## Review history
 

@@ -1,6 +1,6 @@
 # Phase 1 (blind): round-by-round analysis of the Keccacheck verifier
 
-Sources read: `experiments/keccacheck-arkworks/src/verifier.rs` at cc59207, upstream `keccacheck_og/{verifier,prover}.rs`
+Sources read: `crates/keccacheck/src/verifier.rs` at cc59207, upstream `keccacheck_og/{verifier,prover}.rs`
 and `sumcheck/*` at 15f00e3, paper 2025/1764. `docs/` not opened at the time of writing.
 Scripts: `review/model.py`, `review/p1_identities.py`, `review/p1_nonbool.py`.
 

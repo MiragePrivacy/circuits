@@ -12,7 +12,7 @@ import sys
 sys.path.insert(0, sys.argv[1])
 from model import *
 
-CONST = "experiments/keccacheck-arkworks/src/poseidon2_constants.rs"
+CONST = "crates/keccacheck/src/poseidon2_constants.rs"
 vals = [int(x) for x in re.findall(r'MontFp!\(\s*"(\d+)"\s*\)', open(CONST).read())]
 assert len(vals) == 16 * 4 + 57 + 16 * 4, len(vals)
 EXT1 = [vals[i * 16 : (i + 1) * 16] for i in range(4)]

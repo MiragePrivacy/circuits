@@ -49,7 +49,7 @@ All in this directory:
 ## Sources
 
 Code: PR 3 branch at cc59207.
-- experiments/keccacheck-arkworks/src/{verifier,batch,poseidon2,poseidon2_constants}.rs
+- crates/keccacheck/src/{verifier,batch,poseidon2,poseidon2_constants}.rs
 - crates/relation/src/{lib,native}.rs (wiring)
 - Upstream, pinned: ~/.cargo/git/checkouts/keccacheck-1815347201a29f9d/15f00e3
   (rust/gkr/src/keccacheck_og/{prover,verifier}.rs, rust/gkr/src/sumcheck/, gnark/)
@@ -280,7 +280,7 @@ Basis: scratchpad/review/rbr.md; blind count in rbr-phase1.md; identity checks o
 Blind count equals (555n+162)/r term by term. No fatal or repairable errors; cosmetic C1-C6. C1: under 02's own move definition r and initial beta form one interactive move, (L+1)/r. Lead: this does not change 03, because under FS r comes from the statement sponge and beta from the main sponge, so they are separate queries (review-fs computed 8t/p at L=8 independently). C3: the non-Boolean statement in 8.1 should be phrased with arithmetized layers. C6: Booleanity is also what makes the 192-bit packing injective.
 
 ### FACT review-forgery Blind forgery hunt found no forgery (posted by lead)
-Basis: scratchpad/review/forgery.md; tests in worktree agent-ae2a51469f1562a3f (experiments/keccacheck-arkworks/tests/, crates/relation/tests/forgery_relation.rs), matrices evaluated directly.
+Basis: scratchpad/review/forgery.md; tests in worktree agent-ae2a51469f1562a3f (crates/keccacheck/tests/, crates/relation/tests/forgery_relation.rs), matrices evaluated directly.
 End-to-end false ERC-20 payment at 256 instances: all relation rows satisfied except exactly 1 of 3,074,926, in the batch verifier. 360 consistent wrong-function mutations (rounds 0,1,11,22,23 at 2 and 4 instances) each fail exactly one row. All 200 statement word flips rejected. No free verifier witnesses; setup and prove matrices identical. No constant-vs-constant enforce_equal calls while building either relation.
 Latent: header parser fills unread bytes with constant zeros, so a future check outside its read ranges would be a silent no-op. Informational: both sponges share INITIAL_STATE with no domain tag; first absorbs differ.
 
@@ -296,7 +296,7 @@ C2: d/r per round is attained by a cheater, not by the honest poly (iota instanc
 MIN_INSTANCES = 4 stated as deployed (2 at cc59207). L=0 and L=1 results kept as facts, marked unreachable.
 
 ### FACT lead CR-1 applied, production digests unchanged
-Basis: edit to experiments/keccacheck-arkworks/src/verifier.rs (MIN_INSTANCES 4, derive_r asserts, proof-length test list), uncommitted; crate lib tests 15 passed; `ceremony digest` rebuilt both circuits.
+Basis: edit to crates/keccacheck/src/verifier.rs (MIN_INSTANCES 4, derive_r asserts, proof-length test list), uncommitted; crate lib tests 15 passed; `ceremony digest` rebuilt both circuits.
 native-keccacheck de23e3af... and erc20-keccacheck 2a689108..., equal to the beta ceremony's r1cs_digest. The beta keys remain valid under CR-1.
 
 ### FACT fiat-shamir 03 revised for review-fs and review-rbr C1

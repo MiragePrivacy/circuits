@@ -1,7 +1,7 @@
 # 03: Non-interactive soundness of the deployed transcript
 
-Agent: fiat-shamir. Code: PR 3 head cc59207. `V:` means experiments/keccacheck-arkworks/src/verifier.rs. `SP:` means
-experiments/keccacheck-arkworks/src/poseidon2.rs. "02", "04" and "spec" are 02-interactive-soundness.md,
+Agent: fiat-shamir. Code: PR 3 head cc59207. `V:` means crates/keccacheck/src/verifier.rs. `SP:` means
+crates/keccacheck/src/poseidon2.rs. "02", "04" and "spec" are 02-interactive-soundness.md,
 04-poseidon2.md and 01-spec.md. C-O is Chiesa-Orru (2025_536.txt). KRS is Khovratovich-Rothblum-Soukhanov (2025_118.txt).
 
 Notation: p is the BN254 scalar field order, log2 p = 253.597 (01 and 02 call it r; here r is the statement challenge).

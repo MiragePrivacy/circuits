@@ -12,7 +12,7 @@ ark-std.workspace = true
 ark-bn254.workspace = true
 mirage-gadgets = { path = "../gadgets" }
 mirage-encoding = { path = "../encoding" }
-mirage-keccacheck-arkworks = { path = "../../experiments/keccacheck-arkworks" }
+mirage-keccacheck-arkworks = { path = "../keccacheck" }
 
 [dev-dependencies]
 serde.workspace = true
