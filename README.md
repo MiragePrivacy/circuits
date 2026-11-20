@@ -359,10 +359,12 @@ circuits/
     relation/   the ERC-20 receipt relation and the native dual-trie relation
     prover/     setup, prove, verify, Solidity verifier export
     fixtures/   mainnet collection: receipt- and transaction-trie rebuild
+    keccacheck/ in-circuit Keccacheck verifier and soundness tests
+    sgx-bench/  SGX and host proving measurements
+    sgx-ceremony/  production ceremony host and enclave
   contracts/    the exported verifier, a real proof, and its calldata
   test/         VerifierTest.sol plus the deterministic vectors
   test/vectors/ deterministic fixtures shared with nomad and Solidity
-  bench-arkworks/  the backend benchmark that settled the decision
 ```
 
 ## The encoding crate is the authority

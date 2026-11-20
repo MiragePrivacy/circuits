@@ -32,7 +32,7 @@
 //! That is closed by policy, not here: the nomad must never hold two live
 //! requests with identical intents. Settlement soundness depends on that
 //! invariant holding off-chain. See the "Carried by out-of-circuit policy"
-//! section of `experiments/keccacheck-arkworks/RESULTS.md` for the analysis
+//! section of `crates/keccacheck/RESULTS.md` for the analysis
 //! and the alternatives if it stops being tenable.
 
 pub mod native;

@@ -194,8 +194,8 @@ it is not proving-only memory. Proving includes GKR witness generation and
 Groth16 self-verification. Three host samples do not establish p95 or SGX
 hardware performance.
 
-Raw logs: [before](experiments/keccacheck-arkworks/benchmarks/native-structural-before.log),
-[after](experiments/keccacheck-arkworks/benchmarks/native-structural-after.log).
+Raw logs: [before](crates/keccacheck/benchmarks/native-structural-before.log),
+[after](crates/keccacheck/benchmarks/native-structural-after.log).
 
 Executable SHA-256:
 
@@ -266,8 +266,8 @@ combinations (`Inlining LCs`) costs 18.8–20.0 s per Keccacheck proof versus
 multiscalar-multiplication time. Optimizing that expression handling is separate
 from the algorithm port measured here.
 
-Raw profiles: [direct](experiments/keccacheck-arkworks/benchmarks/native-direct.log)
-and [Keccacheck](experiments/keccacheck-arkworks/benchmarks/native-keccacheck.log).
+Raw profiles: [direct](crates/keccacheck/benchmarks/native-direct.log)
+and [Keccacheck](crates/keccacheck/benchmarks/native-keccacheck.log).
 
 ## Validation
 
@@ -304,7 +304,7 @@ measurement, not SGX hardware latency or proving-only peak memory.
 
 Existing setup, transcript-review, and native-versus-ERC-20 timing/privacy
 release gates still apply. See `crates/relation/src/native.rs` and
-`experiments/keccacheck-arkworks/RESULTS.md`.
+`crates/keccacheck/RESULTS.md`.
 
 ## Per-row batch proof fixture
 

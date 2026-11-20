@@ -203,8 +203,8 @@ Advisory, no constraint change: add `#[must_use]` to `KeccacheckBatch`, or a Dro
 
 The crate must be reached through a path outside `.claude/worktrees`, because cargo otherwise walks up to the main checkout's workspace manifest, which does not exclude the nested path. I used a symlink `$WT` to the worktree:
 
-    nix develop -c cargo test --manifest-path $WT/experiments/keccacheck-arkworks/Cargo.toml --release --lib -- --test-threads=12
-    nix develop -c cargo test --manifest-path $WT/experiments/keccacheck-arkworks/Cargo.toml --release --lib -- --ignored --test-threads=1
+    nix develop -c cargo test --manifest-path $WT/crates/keccacheck/Cargo.toml --release --lib -- --test-threads=12
+    nix develop -c cargo test --manifest-path $WT/crates/keccacheck/Cargo.toml --release --lib -- --ignored --test-threads=1
     nix develop -c cargo test -p mirage-prover --release --test keccacheck_identity -- --ignored --test-threads=1
     nix develop -c cargo test -p mirage-relation --release --lib -- --test-threads=1 keccacheck_records batched_setup native::tests::cost
     CEREMONY_CIRCUIT=<circuit> ceremony digest

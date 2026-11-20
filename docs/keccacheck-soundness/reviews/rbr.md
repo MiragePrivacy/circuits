@@ -1,6 +1,6 @@
 # Referee report: round-by-round soundness of interactive Keccacheck
 
-Reviewed: `docs/keccacheck-soundness/01-spec.md` and `02-interactive-soundness.md` against `experiments/keccacheck-arkworks/src/verifier.rs`
+Reviewed: `docs/keccacheck-soundness/01-spec.md` and `02-interactive-soundness.md` against `crates/keccacheck/src/verifier.rs`
 at cc59207, upstream `keccacheck_og` and `sumcheck/*` at 15f00e3, and paper 2025/1764.
 My blind analysis is `review/rbr-phase1.md`, sha256 4a52c56a...e418e6, unchanged after the docs were opened.
 Scripts are in this directory: `model.py`, `p1_identities.py`, `p1_nonbool.py`, `p2_attacks.py`, `p2_fuzz.py`, `p2_replay.py`, `dump/`, `test.sh`, `fuzz.sh`.

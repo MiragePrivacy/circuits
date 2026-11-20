@@ -7,7 +7,7 @@ publish = false
 [workspace]
 
 [dependencies]
-mirage-keccacheck-arkworks = { path = "../../../../../experiments/keccacheck-arkworks" }
+mirage-keccacheck-arkworks = { path = "../../../../../crates/keccacheck" }
 ark-relations = { version = "0.6", features = ["std"] }
 ark-bn254 = { version = "0.6", features = ["std"] }
 

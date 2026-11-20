@@ -1,7 +1,7 @@
 # Phase 1 (blind): Fiat-Shamir bound for the two-chain transcript
 
 Written before opening docs/keccacheck-soundness/.
-Sources: experiments/keccacheck-arkworks/src/{verifier.rs,poseidon2.rs} at cc59207, upstream
+Sources: crates/keccacheck/src/{verifier.rs,poseidon2.rs} at cc59207, upstream
 rust/gkr/src/transcript/, ePrint 2025/536 (Chiesa-Orru, March 2026 text).
 
 ## 0. The transcript as read from code

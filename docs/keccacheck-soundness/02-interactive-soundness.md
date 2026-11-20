@@ -1,7 +1,7 @@
 # 02: Round-by-round soundness of interactive Keccacheck
 
 Agent: protocol. Protocol and notation are those of 01-spec.md (cited as "spec"). `V:` means
-experiments/keccacheck-arkworks/src/verifier.rs at cc59207.
+crates/keccacheck/src/verifier.rs at cc59207.
 
 ## Review history
 

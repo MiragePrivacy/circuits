@@ -1,5 +1,5 @@
 //! Structural checks on the deployed relations at production size.
-#[path = "../../../experiments/keccacheck-arkworks/tests/forgery_common.rs"]
+#[path = "../../keccacheck/tests/forgery_common.rs"]
 mod common;
 
 use ark_bn254::Fr;

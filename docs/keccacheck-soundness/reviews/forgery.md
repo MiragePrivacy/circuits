@@ -13,11 +13,11 @@ Most of these runs left exactly one row unsatisfied.
 ## Tests run (all code in the worktree, uncommitted)
 
 Files:
-- experiments/keccacheck-arkworks/tests/forgery_common.rs: matrix extraction,
+- crates/keccacheck/tests/forgery_common.rs: matrix extraction,
   direct A*B=C evaluation, a fixpoint "is every variable pinned" propagator,
   and `prove_layers`. `prove_layers` is upstream `prove` driven by
   caller-supplied round layers and round constants.
-- experiments/keccacheck-arkworks/tests/forgery_batch.rs
+- crates/keccacheck/tests/forgery_batch.rs
 - crates/relation/tests/forgery_relation.rs. Its dev-deps (gkr,
   ark-bn254-05, keccak) were added to crates/relation/Cargo.toml, which also
   changed Cargo.lock. Both are uncommitted.
