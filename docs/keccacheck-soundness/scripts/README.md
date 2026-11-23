@@ -17,9 +17,9 @@ Run Python scripts from the repository root; source paths inside them are repo-r
 
 Rust tests live with the code:
 
-- experiments/keccacheck-arkworks/src/soundness.rs, testkit.rs, spec_model.rs, matrix.rs (05)
-- experiments/keccacheck-arkworks/src/poseidon2/params_tests.rs, tests/poseidon2_permutation_count.rs (04)
-- experiments/keccacheck-arkworks/tests/forgery_batch.rs, crates/relation/tests/forgery_relation.rs (reviews/forgery.md)
+- crates/keccacheck/src/soundness.rs, testkit.rs, spec_model.rs, matrix.rs (05)
+- crates/keccacheck/src/poseidon2/params_tests.rs, tests/poseidon2_permutation_count.rs (04)
+- crates/keccacheck/tests/forgery_batch.rs, crates/relation/tests/forgery_relation.rs (reviews/forgery.md)
 - crates/prover/tests/keccacheck_identity.rs (05, ceremony digests and keys)
 
 Tests written for 2 instances were moved to 4 (and 4 to 8) when MIN_INSTANCES became 4.

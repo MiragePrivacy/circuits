@@ -2760,6 +2760,7 @@ version = "0.1.0"
 dependencies = [
  "ark-bn254 0.5.0",
  "ark-bn254 0.6.0",
+ "ark-ff 0.5.0",
  "ark-ff 0.6.0",
  "ark-groth16",
  "ark-r1cs-std 0.6.0",

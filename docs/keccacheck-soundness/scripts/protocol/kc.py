@@ -2,7 +2,7 @@
 import re, random, sys
 R = 21888242871839275222246405745257275088548364400416034343698204186575808495617
 HALF = 10944121435919637611123202872628637544274182200208017171849102093287904247809
-SRC = 'experiments/keccacheck-arkworks/src/verifier.rs'
+SRC = 'crates/keccacheck/src/verifier.rs'
 _src = open(SRC).read()
 def _arr(name):
     m = re.search(r'const %s: \[[^\]]+\] = \[(.*?)\];' % name, _src, re.S)

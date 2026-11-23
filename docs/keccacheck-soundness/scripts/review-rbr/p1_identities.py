@@ -8,7 +8,7 @@ import time
 sys.path.insert(0, sys.argv[1])
 from model import *
 
-VER = "experiments/keccacheck-arkworks/src/verifier.rs"
+VER = "crates/keccacheck/src/verifier.rs"
 rng = random.Random(0xC0FFEE)
 
 # 1. FIPS implementation vs hashlib

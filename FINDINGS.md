@@ -416,7 +416,8 @@ load-bearing for the trust model — and enlarges the TCB.
 
 ## Measured: arkworks Groth16 BN254 throughput
 
-Run 2026-08-13. Full report and re-runnable project in `bench-arkworks/`.
+Run 2026-08-13. The synthetic backend sweep informed the backend decision but
+is not part of the maintained circuit source.
 Hardware: Intel i9-14900HX, 24 cores (8 P + 16 E, SMT off), 94 GiB RAM,
 rustc 1.97.1, arkworks 0.5.x. 27 configurations, all proofs verified.
 

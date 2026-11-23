@@ -123,7 +123,5 @@ than a measurement of the production matrix-free path.
 - October 2 `sgx1` chunk-size sweep: native 84.3 / 84.2 / 93.2 s at chunk sizes
   262,144 / 524,288 / 1,048,576, each at 2.11 GiB heap. This is three different
   configurations, not three repetitions of one configuration.
-- [September integration comparisons](experiments/keccacheck-arkworks/RESULTS.md)
+- [September integration comparisons](crates/keccacheck/RESULTS.md)
   retain raw logs for the older batching and structural optimizations.
-- [August synthetic backend sweep](bench-arkworks/RESULTS.md) retains its raw
-  data; it does not measure the current relation or prover.

@@ -1,4 +1,4 @@
-"""Independent model of the Keccacheck verifier in experiments/keccacheck-arkworks/src/verifier.rs.
+"""Independent model of the Keccacheck verifier in crates/keccacheck/src/verifier.rs.
 
 Keccak-f is written from FIPS 202 (rc LFSR, rho walk, pi map), not from the code.
 The trace is computed over the field so non-Boolean inputs can be run too.
